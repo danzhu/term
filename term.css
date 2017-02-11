@@ -1,0 +1,51 @@
+body {
+    color: lightgrey;
+    background-color: black;
+}
+
+#term pre {
+    margin: 0;
+}
+
+#cursor {
+    animation:1s cursor linear infinite;
+}
+
+.prompt {
+    color: grey;
+}
+
+.input {
+    color: lightblue;
+}
+
+.error {
+    color: red;
+}
+
+@keyframes cursor {
+    0% {
+        background-color: lightgrey;
+        color: black;
+    }
+
+    40% {
+        background-color: lightgrey;
+        color: black;
+    }
+
+    50% {
+        background-color: black;
+        color: lightgrey;
+    }
+
+    90% {
+        background-color: black;
+        color: lightgrey;
+    }
+
+    100% {
+        background-color: lightgrey;
+        color: black;
+    }
+}
