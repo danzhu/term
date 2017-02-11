@@ -1,10 +1,5 @@
 'use strict';
 
-let inputContent = '';
-let inputNewest = '';
-let inputCursor = 0;
-let inputHistory = 0;
-
 let programs = [];
 
 function span(str, cls) {
@@ -17,95 +12,163 @@ function escapeHTML(str) {
         .replace(/>/g, '&gt;');
 }
 
-function writeOutput(msg) {
-    const output = document.getElementById('output');
+class Program {
+    constructor(parent = null) {
+        this.prompt = '';
+        this.exitInput = '';
+        this.echo = true;
+        this.history = [];
+        this.variables = parent ? new Map(parent.variables) : new Map();
 
-    if (typeof msg !== 'string')
-        msg = escapeHTML(msg.toString());
-
-    if (!msg)
-        msg = '\n';
-
-    let div = document.createElement('pre');
-    div.innerHTML = msg;
-    output.appendChild(div);
-}
-
-function writeError(msg) {
-    writeOutput(span(msg, 'error'));
-}
-
-function writeHistory(prompt, input) {
-    writeOutput(
-        span(prompt, 'prompt') +
-        span(escapeHTML(input), 'input')
-    );
-}
-
-function changeOutput(msg) {
-    const output = document.getElementById('output');
-
-    output.lastChild.innerHTML = msg;
-}
-
-function clearInput() {
-    inputNewest = inputContent = '';
-    inputCursor = 0;
-}
-
-function updateInput() {
-    const prompt = document.getElementById('prompt');
-    const input = document.getElementById('input');
-    let prog = programs[programs.length - 1];
-
-    prompt.innerHTML = prog ? prog.prompt : '';
-
-    if (!prog || !prog.inputEnabled) {
-        input.innerHTML = inputContent;
-        return;
+        this.stdin = term;
+        this.stdout = term;
+        this.stderr = term;
     }
 
-    let content = inputContent;
+    execute(args = []) {
+        this.args = args;
+        programs.push(this);
 
-    let cursor = '<span id="cursor">' +
-        escapeHTML(content.substr(inputCursor, 1) || ' ') +
-        '</span>';
+        let res = this.run.apply(this, args);
 
-    input.innerHTML = escapeHTML(content.substr(0, inputCursor)) +
-        cursor +
-        escapeHTML(content.substr(inputCursor + 1));
+        if (typeof res === 'number')
+            this.exit(res);
+    }
+
+    run() {
+        // TODO: throw
+    }
+
+    eof() {
+        this.exit();
+    }
+
+    terminate() {
+        this.exit(130);
+    }
+
+    exit(code = 0) {
+        // ignore exit request if already exited
+        if (this != programs[programs.length - 1])
+            return;
+
+        programs.pop();
+
+        // notify parent program
+        let parent = programs[programs.length - 1];
+        if (parent)
+            parent.finish(this, code);
+    }
+
+    input(msg, error = false) {
+        // ignore
+    }
+
+    finish(prog, code) {
+        // ignore
+    }
+
+    writeRaw(content) {
+        this.stdout.input(content);
+    }
+
+    writeText(msg) {
+        this.stdout.input(escapeHTML(msg));
+    }
+
+    writeError(msg) {
+        this.stderr.input(msg, true);
+    }
+
+    writeHistory(prompt, input) {
+        // ignore
+    }
+
+    changeOutput(msg) {
+        // TODO: somehow throw
+    }
+
+    clearInput() {
+        // ignore
+    }
+
+    updateInput() {
+        // ignore
+    }
 }
 
-function execute(prog, args = []) {
-    prog.prompt = '';
-    prog.exitInput = '';
-    prog.echo = true;
-    prog.history = [];
-    prog.variables = this ? new Map(this.variables) : new Map();
+class Term extends Program {
+    constructor() {
+        super();
+        this.inputContent = '';
+        this.inputNewest = '';
+        this.inputCursor = 0;
+        this.inputHistory = 0;
 
-    prog.exit = exit;
-    prog.execute = execute;
+        this.scrollOnInput = true;
+        this.scrollOnOutput = false;
 
-    programs.push(prog);
+        // this.termElement = document.getElementById('term');
+        this.promptElement = document.getElementById('prompt');
+        this.inputElement = document.getElementById('input');
+        this.outputElement = document.getElementById('output');
+    }
 
-    if (prog.init)
-        prog.init(args);
-}
+    input(msg, error = false) {
+        if (typeof msg !== 'string')
+            msg = escapeHTML(msg.toString());
 
-function exit(code = 0) {
-    // ignore exit request if already exited
-    if (this != programs[programs.length - 1])
-        return;
+        if (!msg)
+            msg = '\n';
 
-    programs.pop();
+        if (error)
+            msg = span(msg, 'error');
 
-    if (this.end)
-        this.end();
+        let div = document.createElement('pre');
+        div.innerHTML = msg;
+        this.outputElement.appendChild(div);
 
-    // notify parent program
-    let parent = programs[programs.length - 1];
-    if (parent && parent.finish)
-        parent.finish(this, code);
+        if (this.scrollOnOutput)
+            window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    writeHistory(prompt, input) {
+        this.input(
+            span(prompt, 'prompt') +
+            span(escapeHTML(input), 'input')
+        );
+    }
+
+    changeOutput(msg) {
+        this.outputElement.lastChild.innerHTML = msg;
+    }
+
+    clearInput() {
+        this.inputNewest = this.inputContent = '';
+        this.inputCursor = 0;
+    }
+
+    updateInput() {
+        let prog = programs[programs.length - 1];
+
+        this.promptElement.innerHTML = prog ? prog.prompt : '';
+
+        if (!prog || !prog.inputEnabled) {
+            this.inputElement.innerHTML = this.inputContent;
+            return;
+        }
+
+        let content = this.inputContent;
+
+        let cursor = '<span id="cursor">' +
+            escapeHTML(content.substr(this.inputCursor, 1) || ' ') +
+            '</span>';
+
+        this.inputElement.innerHTML =
+            escapeHTML(content.substr(0, this.inputCursor)) +
+            cursor +
+            escapeHTML(content.substr(this.inputCursor + 1));
+    }
 }
 
 document.addEventListener('keypress', e => {
@@ -116,29 +179,32 @@ document.addEventListener('keypress', e => {
 
     if (e.keyCode === 13) { // Enter key
         if (prog.echo)
-            writeHistory(prog.prompt, inputContent);
+            prog.stdin.writeHistory(prog.prompt, term.inputContent);
 
-        if (prog.input)
-            prog.input(inputContent);
+        prog.input(term.inputContent);
 
         // remove duplicate history and add new entry
-        if (inputContent.trim()) {
-            let idx = prog.history.indexOf(inputContent);
+        if (term.inputContent.trim()) {
+            let idx = prog.history.indexOf(term.inputContent);
             if (idx !== -1)
                 prog.history.splice(idx, 1);
-            prog.history.push(inputContent);
+            prog.history.push(term.inputContent);
         }
 
-        clearInput();
+        prog.stdin.clearInput();
     } else {
-        inputNewest = inputContent = inputContent.substr(0, inputCursor) +
+        term.inputNewest = term.inputContent =
+            term.inputContent.substr(0, term.inputCursor) +
             String.fromCharCode(e.which) +
-            inputContent.substr(inputCursor);
-        ++inputCursor;
+            term.inputContent.substr(term.inputCursor);
+        ++term.inputCursor;
     }
 
-    inputHistory = prog.history.length;
-    updateInput();
+    term.inputHistory = prog.history.length;
+    prog.stdin.updateInput();
+
+    if (term.scrollOnInput)
+        window.scrollTo(0, document.body.scrollHeight);
 });
 
 document.addEventListener('keydown', e => {
@@ -149,14 +215,11 @@ document.addEventListener('keydown', e => {
 
     // ctrl + c always works, even when input is disabled
     if (e.ctrlKey && e.key == 'c') {
-        clearInput();
+        prog.stdin.clearInput();
 
-        if (prog.terminate)
-            prog.terminate();
-        else
-            prog.exit(130);
+        prog.terminate();
 
-        updateInput();
+        prog.stdin.updateInput();
         e.preventDefault();
         return;
     }
@@ -168,85 +231,90 @@ document.addEventListener('keydown', e => {
         switch (e.key) {
             case 'd':
                 // prevent EOF when not on empty line
-                if (inputContent !== '')
+                if (term.inputContent !== '')
                     break;
 
                 // echo termination input if available
                 if (prog.echo || prog.exitInput)
-                    writeHistory(prog.prompt, prog.exitInput);
+                    prog.stdin.writeHistory(prog.prompt, prog.exitInput);
 
-                if (prog.eof)
-                    prog.eof();
-                else
-                    prog.exit();
+                prog.eof();
                 break;
         }
 
-        updateInput();
+        prog.stdin.updateInput();
         e.preventDefault();
         return;
     }
 
     switch (e.key) {
         case 'ArrowLeft':
-            if (inputCursor <= 0)
-                return;
-            --inputCursor;
+            if (term.inputCursor > 0) {
+                --term.inputCursor;
+                prog.stdin.updateInput();
+            }
             break;
 
         case 'ArrowRight':
-            if (inputCursor >= inputContent.length)
-                return;
-            ++inputCursor;
+            if (term.inputCursor < term.inputContent.length) {
+                ++term.inputCursor;
+                prog.stdin.updateInput();
+            }
             break;
 
         case 'ArrowUp':
-            if (inputHistory <= 0)
-                return;
-            --inputHistory;
-            inputContent = prog.history[inputHistory];
-            inputCursor = inputContent.length;
+            if (term.inputHistory > 0) {
+                --term.inputHistory;
+                term.inputContent = prog.history[term.inputHistory];
+                term.inputCursor = term.inputContent.length;
+                prog.stdin.updateInput();
+            }
             break;
 
         case 'ArrowDown':
-            if (inputHistory >= prog.history.length)
-                return;
-
-            ++inputHistory;
-            inputContent = inputHistory === prog.history.length ?
-                inputNewest :
-                prog.history[inputHistory];
-            inputCursor = inputContent.length;
+            if (term.inputHistory < prog.history.length) {
+                ++term.inputHistory;
+                term.inputContent = term.inputHistory === prog.history.length ?
+                    term.inputNewest :
+                    prog.history[term.inputHistory];
+                term.inputCursor = term.inputContent.length;
+                prog.stdin.updateInput();
+            }
             break;
 
         case 'Backspace':
-            if (inputCursor <= 0)
-                return;
-            inputNewest = inputContent =
-                inputContent.substr(0, inputCursor - 1) +
-                inputContent.substr(inputCursor);
-            --inputCursor;
+            if (term.inputCursor > 0) {
+                term.inputNewest = term.inputContent =
+                    term.inputContent.substr(0, term.inputCursor - 1) +
+                    term.inputContent.substr(term.inputCursor);
+                --term.inputCursor;
+                prog.stdin.updateInput();
+            }
             break;
 
         case 'Tab':
-            e.preventDefault();
+            // TODO: completion
             break;
 
         default:
+            // don't prevent other keys from functioning
             return;
     }
 
-    updateInput();
+    e.preventDefault();
+
+    if (term.scrollOnInput)
+        window.scrollTo(0, document.body.scrollHeight);
 });
 
-class Shell {
-    init(args) {
-        writeOutput('Term v0.1');
+class Shell extends Program {
+    run(script) {
+        this.writeText('Term v0.1');
 
         this.exitInput = 'exit';
         this.inputEnabled = true;
 
-        this.finish(0);
+        this.finish(null, 0);
     }
 
     input(str) {
@@ -279,28 +347,34 @@ class Shell {
         if (params.length === 0)
             return;
 
-        let [prog, ...args] = params;
+        let [cmd, ...args] = params;
 
-        switch (prog) {
+        switch (cmd) {
             case 'history':
-                writeOutput(this.history.map(escapeHTML).join('\n'));
+                this.writeText(this.history.join('\n'));
                 break;
 
             case 'exit':
                 let code = Number.parseInt(args[0]);
                 if (Number.isNaN(code)) {
-                    writeError('exit: ' + args[0] + ': numeric argument required');
+                    this.writeError('exit: ' + args[0] + ': numeric argument required');
                     code = 2;
                 }
                 this.exit(code);
                 break;
 
             default:
-                if (bin[prog]) {
-                    this.execute(new bin[prog](), args);
-                } else {
-                    writeError('command not found: ' + escapeHTML(prog));
-                    this.finish(127);
+                if (!bin[cmd]) {
+                    this.writeError('command not found: ' + escapeHTML(cmd));
+                    this.finish(null, 127);
+                    break;
+                }
+
+                let prog = new bin[cmd](this);
+                try {
+                    prog.execute(args);
+                } catch (e) {
+                    this.writeError('sh: ' + e.toString());
                 }
                 break;
         }
@@ -316,126 +390,130 @@ class Shell {
     }
 }
 
-class Interpreter {
-    init(args) {
+class Interpreter extends Program {
+    run() {
         this.prompt = '> '
         this.inputEnabled = true;
     }
 
     input(str) {
         try {
-            writeOutput(eval(str));
+            this.writeText(eval(str));
         } catch (e) {
-            writeError(e);
+            this.writeError(e);
         }
     }
 }
 
-class Cat {
-    init(args) {
-        if (args.length === 0) {
+class Cat extends Program {
+    run(file) {
+        if (!file) {
             this.inputEnabled = true;
             return;
         }
 
-        let content = localStorage.getItem(args[0]);
+        let content = localStorage.getItem(file);
         if (content === null) {
-            this.exit(1);
-            writeError('cat: ' + args[0] + ': no such file');
-            return;
+            this.writeError('cat: ' + file + ': no such file');
+            return 1;
         }
 
-        writeOutput(content);
-        this.exit();
+        this.writeText(content);
+        return 0;
     }
 
     input(str) {
-        writeOutput(str);
+        this.writeText(str);
     }
 }
 
-class List {
-    init(args) {
+class List extends Program {
+    run() {
         let list = [];
         for (let name in localStorage)
             list.push(name);
 
         if (list.length !== 0)
-            writeOutput(list);
+            this.writeText(list);
         this.exit();
     }
 }
 
-class Remove {
-    init(args) {
-        if (args.length === 0) {
-            writeError('rm: missing operand');
-            this.exit(1);
-            return;
+class Remove extends Program {
+    run(file) {
+        if (!file) {
+            this.writeError('rm: missing operand');
+            return 1;
         }
 
-        localStorage.removeItem(args[0]);
-        this.exit();
+        localStorage.removeItem(file);
+        return 0;
     }
 }
 
-class Curl {
-    init(args) {
-        if (args.length === 0) {
-            writeError('curl: missing url');
-            this.exit(1);
-            return;
+class Curl extends Program {
+    run(url) {
+        if (!url) {
+            this.writeError('curl: missing url');
+            return 1;
         }
 
         let req = new XMLHttpRequest();
-        req.open('GET', args[0]);
+        req.open('GET', url);
         req.onreadystatechange = () => {
             if (req.status != 200) {
                 this.exit(1);
+                return;
             }
-            writeOutput(escapeHTML(req.responseText));
+            this.writeText(req.responseText);
+            this.stdin.updateInput();
             this.exit();
-            updateInput();
         };
         req.send();
     }
 }
 
-class Sleep {
-    init(args) {
-        if (args.length === 0) {
-            writeError('sleep: missing operand');
-            this.exit(1);
-            return;
+class Sleep extends Program {
+    run(time) {
+        if (!time) {
+            this.writeError('sleep: missing operand');
+            return 1;
         }
 
         setTimeout(() => {
             this.exit();
-            updateInput();
-        }, Number.parseFloat(args[0]) * 1000);
+            this.stdin.updateInput();
+        }, Number.parseFloat(time) * 1000);
     }
 }
 
-class Echo {
-    init(args) {
-        writeOutput(args.join(' '));
-        this.exit();
+class Echo extends Program {
+    run() {
+        this.writeText([...arguments].join(' '));
+        return 0;
     }
 }
 
-class Clear {
-    init(args) {
+class Print extends Program {
+    run() {
+        this.writeRaw([...arguments].join(' '));
+        return 0;
+    }
+}
+
+class Clear extends Program {
+    run() {
         const output = document.getElementById('output');
         while (output.lastChild)
             output.removeChild(output.lastChild);
 
-        this.exit();
+        return 0;
     }
 }
 
-class False {
-    init(args) {
-        this.exit(1);
+class False extends Program {
+    run() {
+        return 1;
     }
 }
 
@@ -448,9 +526,15 @@ const bin = {
     'curl': Curl,
     'sleep': Sleep,
     'echo': Echo,
+    'print': Print,
     'clear': Clear,
     'false': False
 };
 
-execute(new Shell());
-updateInput();
+let term = null;
+term = new Term();
+
+let sh = new Shell();
+programs.push(sh);
+sh.run(['-']);
+term.updateInput();
