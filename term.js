@@ -12,7 +12,9 @@ function span(str, cls) {
 }
 
 function escapeHTML(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return str.replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function writeOutput(msg) {
@@ -74,11 +76,16 @@ function updateInput() {
         escapeHTML(content.substr(inputCursor + 1));
 }
 
-function execute(prog, args) {
+function execute(prog, args = []) {
     prog.prompt = '';
-    prog.exit = '';
+    prog.exitInput = '';
     prog.echo = true;
     prog.history = [];
+    prog.variables = this ? new Map(this.variables) : new Map();
+
+    prog.exit = exit;
+    prog.execute = execute;
+
     programs.push(prog);
 
     if (prog.init)
@@ -86,15 +93,19 @@ function execute(prog, args) {
 }
 
 function exit(code = 0) {
-    let prog = programs.pop();
+    // ignore exit request if already exited
+    if (this != programs[programs.length - 1])
+        return;
 
-    if (prog.end)
-        prog.end();
+    programs.pop();
+
+    if (this.end)
+        this.end();
 
     // notify parent program
-    prog = programs[programs.length - 1];
-    if (prog && prog.finish)
-        prog.finish(code || 0);
+    let parent = programs[programs.length - 1];
+    if (parent && parent.finish)
+        parent.finish(this, code);
 }
 
 document.addEventListener('keypress', e => {
@@ -133,8 +144,48 @@ document.addEventListener('keypress', e => {
 document.addEventListener('keydown', e => {
     let prog = programs[programs.length - 1];
 
-    if (!prog || !prog.inputEnabled)
+    if (!prog)
         return;
+
+    // ctrl + c always works, even when input is disabled
+    if (e.ctrlKey && e.key == 'c') {
+        clearInput();
+
+        if (prog.terminate)
+            prog.terminate();
+        else
+            prog.exit(130);
+
+        updateInput();
+        e.preventDefault();
+        return;
+    }
+
+    if (!prog.inputEnabled)
+        return;
+
+    if (e.ctrlKey) {
+        switch (e.key) {
+            case 'd':
+                // prevent EOF when not on empty line
+                if (inputContent !== '')
+                    break;
+
+                // echo termination input if available
+                if (prog.echo || prog.exitInput)
+                    writeHistory(prog.prompt, prog.exitInput);
+
+                if (prog.eof)
+                    prog.eof();
+                else
+                    prog.exit();
+                break;
+        }
+
+        updateInput();
+        e.preventDefault();
+        return;
+    }
 
     switch (e.key) {
         case 'ArrowLeft':
@@ -182,34 +233,7 @@ document.addEventListener('keydown', e => {
             break;
 
         default:
-            if (e.ctrlKey) {
-                switch (e.key) {
-                    case 'd':
-                        if (inputContent !== '')
-                            break;
-
-                        // echo termination input if available
-                        if (prog.echo || prog.exit)
-                            writeHistory(prog.prompt, prog.exit);
-
-                        exit();
-                        break;
-
-                    case 'c':
-                        clearInput();
-                        if (prog.terminate)
-                            prog.terminate();
-                        else
-                            exit(130);
-                        break;
-                }
-
-                e.preventDefault();
-                e.stopPropagation();
-            } else {
-                return;
-            }
-            break;
+            return;
     }
 
     updateInput();
@@ -219,29 +243,43 @@ class Shell {
     init(args) {
         writeOutput('Term v0.1');
 
-        this.exit = 'exit';
+        this.exitInput = 'exit';
         this.inputEnabled = true;
 
-        this.variables = new Map();
         this.finish(0);
     }
 
     input(str) {
         str = str.trim();
 
-        // ignore empty command
-        if (!str)
-            return;
-
         // TODO: parse parameters
-        let [prog, ...args] = str.split(' ').filter(e => e.length !== 0);
+        let params = str.split(' ').filter(e => e.length !== 0);
 
-        for (let i = args.length - 1; i >= 0; --i) {
-            if (args[i][0] === '$') {
-                let val = this.variables.get(args[i].substr(1));
-                args[i] = val ? val.toString() : '';
+        // resolve variables
+        // TODO: merge with parsing for in-line usage
+        for (let i = params.length - 1; i >= 0; --i) {
+            if (params[i][0] === '$') {
+                let val = this.variables.get(params[i].substr(1));
+                params[i] = val !== undefined ? val.toString() : '';
             }
         }
+
+        // process variable assignments
+        while (params.length > 0) {
+            let idx = params[0].indexOf('=');
+            if (idx === -1)
+                break;
+
+            let name = params[0].substr(0, idx);
+            let value = params[0].substr(idx + 1);
+            this.variables.set(name, value);
+            params.shift();
+        }
+
+        if (params.length === 0)
+            return;
+
+        let [prog, ...args] = params;
 
         switch (prog) {
             case 'history':
@@ -249,13 +287,17 @@ class Shell {
                 break;
 
             case 'exit':
-                let code = Number.parseInt(args);
-                exit(code);
+                let code = Number.parseInt(args[0]);
+                if (Number.isNaN(code)) {
+                    writeError('exit: ' + args[0] + ': numeric argument required');
+                    code = 2;
+                }
+                this.exit(code);
                 break;
 
             default:
                 if (bin[prog]) {
-                    execute(new bin[prog](), args);
+                    this.execute(new bin[prog](), args);
                 } else {
                     writeError('command not found: ' + escapeHTML(prog));
                     this.finish(127);
@@ -268,7 +310,7 @@ class Shell {
         // ignore
     }
 
-    finish(code) {
+    finish(prog, code) {
         this.variables.set('?', code);
         this.prompt = code ? span('$ ', 'error') : '$ ';
     }
@@ -296,15 +338,15 @@ class Cat {
             return;
         }
 
-        let content = window.localStorage.getItem(args[0]);
+        let content = localStorage.getItem(args[0]);
         if (content === null) {
-            exit(1);
+            this.exit(1);
             writeError('cat: ' + args[0] + ': no such file');
             return;
         }
 
         writeOutput(content);
-        exit();
+        this.exit();
     }
 
     input(str) {
@@ -312,19 +354,72 @@ class Cat {
     }
 }
 
+class List {
+    init(args) {
+        let list = [];
+        for (let name in localStorage)
+            list.push(name);
+
+        if (list.length !== 0)
+            writeOutput(list);
+        this.exit();
+    }
+}
+
+class Remove {
+    init(args) {
+        if (args.length === 0) {
+            writeError('rm: missing operand');
+            this.exit(1);
+            return;
+        }
+
+        localStorage.removeItem(args[0]);
+        this.exit();
+    }
+}
+
+class Curl {
+    init(args) {
+        if (args.length === 0) {
+            writeError('curl: missing url');
+            this.exit(1);
+            return;
+        }
+
+        let req = new XMLHttpRequest();
+        req.open('GET', args[0]);
+        req.onreadystatechange = () => {
+            if (req.status != 200) {
+                this.exit(1);
+            }
+            writeOutput(escapeHTML(req.responseText));
+            this.exit();
+            updateInput();
+        };
+        req.send();
+    }
+}
+
 class Sleep {
     init(args) {
+        if (args.length === 0) {
+            writeError('sleep: missing operand');
+            this.exit(1);
+            return;
+        }
+
         setTimeout(() => {
-            exit();
+            this.exit();
             updateInput();
-        }, Number.parseInt(args[0]) * 1000);
+        }, Number.parseFloat(args[0]) * 1000);
     }
 }
 
 class Echo {
     init(args) {
         writeOutput(args.join(' '));
-        exit();
+        this.exit();
     }
 }
 
@@ -334,13 +429,13 @@ class Clear {
         while (output.lastChild)
             output.removeChild(output.lastChild);
 
-        exit();
+        this.exit();
     }
 }
 
 class False {
     init(args) {
-        exit(1);
+        this.exit(1);
     }
 }
 
@@ -348,6 +443,9 @@ const bin = {
     'sh': Shell,
     'js': Interpreter,
     'cat': Cat,
+    'ls': List,
+    'rm': Remove,
+    'curl': Curl,
     'sleep': Sleep,
     'echo': Echo,
     'clear': Clear,
