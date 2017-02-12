@@ -1,10 +1,22 @@
 body {
+    margin: 0;
+}
+
+#term {
+    position: absolute;
+    box-sizing: border-box;
+    height: 100%;
+    width: 100%;
+    padding: 10px;
+    overflow-x: hidden;
     color: lightgrey;
-    background-color: black;
+    background-color: rgb(15, 15, 15);
 }
 
 #term pre {
     margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 
 #cursor {
@@ -20,7 +32,7 @@ body {
 }
 
 .error {
-    color: red;
+    color: rgb(255, 127, 127);
 }
 
 @keyframes cursor {
@@ -35,12 +47,12 @@ body {
     }
 
     50% {
-        background-color: black;
+        background-color: transparent;
         color: lightgrey;
     }
 
     90% {
-        background-color: black;
+        background-color: transparent;
         color: lightgrey;
     }
 

@@ -77,7 +77,7 @@ class Program {
     }
 
     writeError(msg) {
-        this.stderr.input(msg, true);
+        this.stderr.input(escapeHTML(msg), true);
     }
 
     writeHistory(prompt, input) {
@@ -106,9 +106,9 @@ class Term extends Program {
         this.inputHistory = 0;
 
         this.scrollOnInput = true;
-        this.scrollOnOutput = false;
+        this.scrollOnOutput = true;
 
-        // this.termElement = document.getElementById('term');
+        this.termElement = document.getElementById('term');
         this.promptElement = document.getElementById('prompt');
         this.inputElement = document.getElementById('input');
         this.outputElement = document.getElementById('output');
@@ -128,8 +128,9 @@ class Term extends Program {
         div.innerHTML = msg;
         this.outputElement.appendChild(div);
 
+        // FIXME: always scroll if at bottom
         if (this.scrollOnOutput)
-            window.scrollTo(0, document.body.scrollHeight);
+            this.termElement.scrollTop = this.termElement.scrollHeight;
     }
 
     writeHistory(prompt, input) {
@@ -204,7 +205,7 @@ document.addEventListener('keypress', e => {
     prog.stdin.updateInput();
 
     if (term.scrollOnInput)
-        window.scrollTo(0, document.body.scrollHeight);
+        term.termElement.scrollTop = term.termElement.scrollHeight;
 });
 
 document.addEventListener('keydown', e => {
@@ -304,7 +305,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
 
     if (term.scrollOnInput)
-        window.scrollTo(0, document.body.scrollHeight);
+        term.termElement.scrollTop = term.termElement.scrollHeight;
 });
 
 class Shell extends Program {
@@ -365,7 +366,7 @@ class Shell extends Program {
 
             default:
                 if (!bin[cmd]) {
-                    this.writeError('command not found: ' + escapeHTML(cmd));
+                    this.writeError('command not found: ' + cmd);
                     this.finish(null, 127);
                     break;
                 }
@@ -398,9 +399,9 @@ class Interpreter extends Program {
 
     input(str) {
         try {
-            this.writeText(eval(str));
+            this.writeText(String(eval(str)));
         } catch (e) {
-            this.writeError(e);
+            this.writeError(e.toString());
         }
     }
 }
