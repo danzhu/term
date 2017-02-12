@@ -1,7 +1,5 @@
 'use strict';
 
-let programs = [];
-
 function span(str, cls) {
     return '<span class="' + cls + '">' + str + '</span>';
 }
@@ -20,16 +18,21 @@ class Program {
         this.echo = true;
         this.password = false;
         this.history = [];
+        this.parent = parent;
+        this.children = new Set();
         this.variables = parent ? new Map(parent.variables) : new Map();
 
         this.stdin = term;
         this.stdout = term;
         this.stderr = termErr;
+
+        if (parent)
+            parent.children.add(this);
     }
 
     execute(args = []) {
         this.args = args;
-        programs.push(this);
+        term.stdout = this;
 
         let res = this.onRun.apply(this, args);
 
@@ -38,25 +41,20 @@ class Program {
     }
 
     exit(code = 0) {
-        let idx = programs.indexOf(this);
+        for (let child of this.children)
+            child.exit();
 
-        // ignore exit request if already exited
-        if (idx === -1)
-            return;
+        if (this.parent)
+            this.parent.children.delete(this);
 
-        // FIXME: this might not be the correct chain-terminate behaviour
-        for (let i = programs.length - 1; i > idx; --i)
-            programs[i].exit();
+        term.stdout = this.parent;
 
-        programs.pop();
-
-        let parent = programs[programs.length - 1];
-        if (!parent)
+        if (!this.parent)
             return;
 
         // reset input and notify parent program
-        parent.stdin.clearInput();
-        parent.onReturn(this, code);
+        this.parent.stdin.clearInput();
+        this.parent.onReturn(this, code);
     }
 
     onRun() {
@@ -124,6 +122,165 @@ class Term extends Program {
         this.promptElement = document.getElementById('prompt');
         this.inputElement = document.getElementById('input');
         this.outputElement = document.getElementById('output');
+
+        document.addEventListener('keypress', e => {
+            let prog = this.stdout;
+
+            if (!prog || !prog.inputEnabled)
+                return;
+
+            if (e.keyCode === 13) { // Enter key
+                if (prog.echo) {
+                    let content = prog.password ?
+                        '*'.repeat(term.inputContent.length) :
+                        term.inputContent;
+                    prog.stdin.writeHistory(prog.prompt, content);
+                }
+
+                let content = term.inputContent;
+
+                prog.onInput(term.inputContent);
+
+                // remove duplicate history and add new entry
+                if (!prog.password && content.trim()) {
+                    let idx = prog.history.indexOf(content);
+                    if (idx !== -1)
+                        prog.history.splice(idx, 1);
+                    prog.history.push(content);
+                }
+
+                prog.stdin.clearInput();
+            } else {
+                term.inputNewest = term.inputContent =
+                    term.inputContent.substr(0, term.inputCursor) +
+                    String.fromCharCode(e.which) +
+                    term.inputContent.substr(term.inputCursor);
+                ++term.inputCursor;
+            }
+
+            term.inputHistory = prog.history.length;
+            prog.stdin.updateInput();
+
+            if (term.scrollOnInput)
+                term.termElement.scrollTop = term.termElement.scrollHeight;
+        });
+
+        document.addEventListener('keydown', e => {
+            let prog = this.stdout;
+
+            if (!prog)
+                return;
+
+            // ctrl + c always works, even when input is disabled
+            if (e.ctrlKey && e.key == 'c') {
+                prog.stdin.clearInput();
+
+                prog.onTerminate();
+
+                prog.stdin.updateInput();
+                e.preventDefault();
+                return;
+            }
+
+            if (!prog.inputEnabled)
+                return;
+
+            if (e.ctrlKey) {
+                switch (e.key) {
+                    case 'd':
+                        // prevent EOF when not on empty line
+                        if (term.inputContent !== '')
+                            break;
+
+                        // echo termination input if available
+                        if (prog.echo || prog.exitInput)
+                            prog.stdin.writeHistory(prog.prompt, prog.exitInput);
+
+                        prog.onEOF();
+                        break;
+                }
+
+                prog.stdin.updateInput();
+                e.preventDefault();
+                return;
+            }
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    if (term.inputCursor > 0) {
+                        --term.inputCursor;
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'ArrowRight':
+                    if (term.inputCursor < term.inputContent.length) {
+                        ++term.inputCursor;
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'ArrowUp':
+                    if (term.inputHistory > 0) {
+                        --term.inputHistory;
+                        term.inputContent = prog.history[term.inputHistory];
+                        term.inputCursor = term.inputContent.length;
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'ArrowDown':
+                    if (term.inputHistory < prog.history.length) {
+                        ++term.inputHistory;
+                        term.inputContent =
+                            term.inputHistory === prog.history.length ?
+                            term.inputNewest :
+                            prog.history[term.inputHistory];
+                        term.inputCursor = term.inputContent.length;
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'Backspace':
+                    if (term.inputCursor > 0) {
+                        term.inputNewest = term.inputContent =
+                            term.inputContent.substr(0, term.inputCursor - 1) +
+                            term.inputContent.substr(term.inputCursor);
+                        --term.inputCursor;
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'Delete':
+                    if (term.inputCursor < term.inputContent.length) {
+                        term.inputNewest = term.inputContent =
+                            term.inputContent.substr(0, term.inputCursor) +
+                            term.inputContent.substr(term.inputCursor + 1);
+                        prog.stdin.updateInput();
+                    }
+                    break;
+
+                case 'Tab':
+                    // TODO: completion
+                    break;
+
+                default:
+                    // don't prevent other keys from functioning
+                    return;
+            }
+
+            e.preventDefault();
+
+            if (term.scrollOnInput)
+                term.termElement.scrollTop = term.termElement.scrollHeight;
+        });
+
+    }
+
+    onRun(shell) {
+        this.sh = new shell();
+        this.sh.execute(['-']);
+        this.updateInput();
     }
 
     onInput(msg, error = false) {
@@ -157,7 +314,7 @@ class Term extends Program {
     }
 
     clearInput() {
-        let prog = programs[programs.length - 1];
+        let prog = this.stdout;
 
         this.inputNewest = this.inputContent = '';
         this.inputCursor = 0;
@@ -166,7 +323,7 @@ class Term extends Program {
     }
 
     updateInput() {
-        let prog = programs[programs.length - 1];
+        let prog = this.stdout;
 
         this.promptElement.innerHTML = prog ? prog.prompt : '';
 
@@ -203,157 +360,6 @@ class TermError extends Program {
         term.write(span(content, 'error'));
     }
 }
-
-document.addEventListener('keypress', e => {
-    let prog = programs[programs.length - 1];
-
-    if (!prog || !prog.inputEnabled)
-        return;
-
-    if (e.keyCode === 13) { // Enter key
-        if (prog.echo) {
-            let content = prog.password ?
-                '*'.repeat(term.inputContent.length) :
-                term.inputContent;
-            prog.stdin.writeHistory(prog.prompt, content);
-        }
-
-        let content = term.inputContent;
-
-        prog.onInput(term.inputContent);
-
-        // remove duplicate history and add new entry
-        if (!prog.password && content.trim()) {
-            let idx = prog.history.indexOf(content);
-            if (idx !== -1)
-                prog.history.splice(idx, 1);
-            prog.history.push(content);
-        }
-
-        prog.stdin.clearInput();
-    } else {
-        term.inputNewest = term.inputContent =
-            term.inputContent.substr(0, term.inputCursor) +
-            String.fromCharCode(e.which) +
-            term.inputContent.substr(term.inputCursor);
-        ++term.inputCursor;
-    }
-
-    term.inputHistory = prog.history.length;
-    prog.stdin.updateInput();
-
-    if (term.scrollOnInput)
-        term.termElement.scrollTop = term.termElement.scrollHeight;
-});
-
-document.addEventListener('keydown', e => {
-    let prog = programs[programs.length - 1];
-
-    if (!prog)
-        return;
-
-    // ctrl + c always works, even when input is disabled
-    if (e.ctrlKey && e.key == 'c') {
-        prog.stdin.clearInput();
-
-        prog.onTerminate();
-
-        prog.stdin.updateInput();
-        e.preventDefault();
-        return;
-    }
-
-    if (!prog.inputEnabled)
-        return;
-
-    if (e.ctrlKey) {
-        switch (e.key) {
-            case 'd':
-                // prevent EOF when not on empty line
-                if (term.inputContent !== '')
-                    break;
-
-                // echo termination input if available
-                if (prog.echo || prog.exitInput)
-                    prog.stdin.writeHistory(prog.prompt, prog.exitInput);
-
-                prog.onEOF();
-                break;
-        }
-
-        prog.stdin.updateInput();
-        e.preventDefault();
-        return;
-    }
-
-    switch (e.key) {
-        case 'ArrowLeft':
-            if (term.inputCursor > 0) {
-                --term.inputCursor;
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'ArrowRight':
-            if (term.inputCursor < term.inputContent.length) {
-                ++term.inputCursor;
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'ArrowUp':
-            if (term.inputHistory > 0) {
-                --term.inputHistory;
-                term.inputContent = prog.history[term.inputHistory];
-                term.inputCursor = term.inputContent.length;
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'ArrowDown':
-            if (term.inputHistory < prog.history.length) {
-                ++term.inputHistory;
-                term.inputContent = term.inputHistory === prog.history.length ?
-                    term.inputNewest :
-                    prog.history[term.inputHistory];
-                term.inputCursor = term.inputContent.length;
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'Backspace':
-            if (term.inputCursor > 0) {
-                term.inputNewest = term.inputContent =
-                    term.inputContent.substr(0, term.inputCursor - 1) +
-                    term.inputContent.substr(term.inputCursor);
-                --term.inputCursor;
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'Delete':
-            if (term.inputCursor < term.inputContent.length) {
-                term.inputNewest = term.inputContent =
-                    term.inputContent.substr(0, term.inputCursor) +
-                    term.inputContent.substr(term.inputCursor + 1);
-                prog.stdin.updateInput();
-            }
-            break;
-
-        case 'Tab':
-            // TODO: completion
-            break;
-
-        default:
-            // don't prevent other keys from functioning
-            return;
-    }
-
-    e.preventDefault();
-
-    if (term.scrollOnInput)
-        term.termElement.scrollTop = term.termElement.scrollHeight;
-});
 
 class Shell extends Program {
     onRun(script) {
@@ -545,7 +551,7 @@ class Echo extends Program {
 
 class Print extends Program {
     onRun() {
-        this.writeRaw(this.args.join(' '));
+        this.stdout.write(this.args.join(' '));
         return 0;
     }
 }
@@ -582,9 +588,9 @@ const bin = {
 
 let term = null;
 let termErr = null;
+let program = null;
+
 term = new Term();
 termErr = new TermError();
 
-let sh = new Shell();
-sh.execute(['-']);
-term.updateInput();
+term.execute([Shell]);
