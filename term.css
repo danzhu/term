@@ -17,10 +17,16 @@ body {
     margin: 0;
     white-space: pre-wrap;
     word-wrap: break-word;
+    transition: all 0.2s;
+    animation: 1s output linear;
+}
+
+#term pre:hover {
+    background-color: rgb(31, 31, 31);
 }
 
 #cursor {
-    animation:1s cursor linear infinite;
+    animation: 1s cursor linear infinite;
 }
 
 .prompt {
@@ -59,5 +65,19 @@ body {
     100% {
         background-color: lightgrey;
         color: black;
+    }
+}
+
+@keyframes output {
+    0% {
+        background-color: inherit;
+    }
+
+    5% {
+        background-color: rgb(31, 31, 31);
+    }
+
+    100% {
+        background-color: inherit;
     }
 }

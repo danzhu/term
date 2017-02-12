@@ -111,7 +111,7 @@ class Program {
     }
 
     writeText(msg) {
-        this.write(escapeHTML(msg));
+        this.write(msg);
     }
 
     writeHistory(prompt, input) {
@@ -135,7 +135,6 @@ class Term extends Program {
     constructor() {
         super();
         this.inputEnabled = true;
-        this.stdin = this.stdout = this.stderr = null;
 
         this.inputContent = '';
         this.inputNewest = '';
@@ -329,6 +328,10 @@ class Term extends Program {
             this.termElement.scrollTop = this.termElement.scrollHeight;
     }
 
+    writeText(msg) {
+        this.write(escapeHTML(msg));
+    }
+
     writeHistory(prompt, input) {
         this.write(
             span(prompt, 'prompt') +
@@ -380,7 +383,6 @@ class Term extends Program {
 class TermError extends Program {
     constructor() {
         super();
-        this.stdin = this.stdout = this.stderr = null;
         this.inputEnabled = true;
     }
 
@@ -389,7 +391,7 @@ class TermError extends Program {
     }
 
     onInput(content) {
-        term.write(span(content, 'error'));
+        this.stdout.write(span(content, 'error'));
     }
 }
 
@@ -403,13 +405,13 @@ class Monitor extends Program {
 
     onEOF() {
         if (this.eof)
-            this.eof();
+            this.eof(this);
         else
             super.onEOF();
     }
 
     onInput(str) {
-        this.callback(str);
+        this.callback(this, str);
     }
 }
 
@@ -421,6 +423,18 @@ class Printer extends Program {
 
     onRun() {
         this.stdout.writeText(this.content);
+        return 0;
+    }
+}
+
+class Caller extends Program {
+    constructor(parent, fn) {
+        super(parent);
+        this.fn = fn;
+    }
+
+    onRun() {
+        this.fn(this);
         return 0;
     }
 }
@@ -480,8 +494,16 @@ class Shell extends Program {
             programs[programs.length - 1].push(params[i]);
         }
 
+        // detect pipe errors
+        if (programs.some(e => e.length === 0)) {
+            this.stderr.writeText('sh: invalid pipe');
+            this.setPrompt(1);
+            return;
+        }
+
         let processes = programs.map(e => this.createProcess(e[0]));
 
+        // detect non-existent processes
         if (processes.some(e => !e)) {
             this.setPrompt(127);
             return;
@@ -499,6 +521,7 @@ class Shell extends Program {
                 processes[i].stdout = processes[i + 1];
         }
 
+        // execute in reverse order so that input can be received
         for (let i = processes.length - 1; i >= 0; --i) {
             processes[i].execute(args[i]);
         }
@@ -524,15 +547,27 @@ class Shell extends Program {
             case 'history':
                 return new Printer(this, this.history.join('\n'));
 
-            // case 'exit':
-            //     let code = Number.parseInt(args[0]);
-            //     if (Number.isNaN(code)) {
-            //         this.stderr.writeText('exit: ' +
-            //             args[0] + ': numeric argument required');
-            //         code = 2;
-            //     }
-            //     this.exit(code);
-            //     break;
+            case 'read':
+                return new Monitor(this, (proc, str) => {
+                    this.variables.set(proc.args[0], str);
+                    proc.exit();
+                });
+
+            case 'echo':
+                return new Caller(this, (proc) => {
+                    proc.stdout.writeText(proc.args.join(' '));
+                });
+
+            case 'exit':
+                return new Caller(this, (proc) => {
+                    let code = Number.parseInt(proc.args[0]);
+                    if (Number.isNaN(code)) {
+                        proc.stderr.writeText('sh: exit: ' +
+                            proc.args[0] + ': numeric argument required');
+                        code = 2;
+                    }
+                    this.exit(code);
+                });
         }
 
         if (!bin[cmd]) {
@@ -582,14 +617,28 @@ class Cat extends Program {
     }
 }
 
+class Tee extends Program {
+    onRun(file) {
+        this.content = [];
+        this.file = file;
+        this.inputEnabled = true;
+    }
+
+    onInput(str) {
+        this.content.push(str);
+        this.stdout.writeText(str);
+        localStorage.setItem(this.file, this.content.join('\n'));
+    }
+}
+
 class List extends Program {
     onRun() {
         let list = [];
         for (let name in localStorage)
             list.push(name);
 
-        if (list.length !== 0)
-            this.stdout.writeText(list);
+        for (let l of list)
+            this.stdout.writeText(l);
         return 0;
     }
 }
@@ -613,17 +662,83 @@ class Curl extends Program {
             return 1;
         }
 
-        let req = new XMLHttpRequest();
-        req.open('GET', url);
-        req.onreadystatechange = () => {
-            if (req.status != 200) {
+        this.req = new XMLHttpRequest();
+        this.req.open('GET', url, true);
+        this.req.onreadystatechange = () => {
+            if (this.req.readyState !== 4)
+                return;
+
+            if (this.req.status != 200) {
                 this.exit(1);
                 return;
             }
-            this.stdout.writeText(req.responseText);
+            let lines = this.req.responseText.split('\n');
+            for (let line of lines)
+                this.stdout.writeText(line);
             this.exit();
         };
-        req.send();
+        this.req.send();
+    }
+
+    onTerminate() {
+        this.req.abort();
+        super.onTerminate();
+    }
+}
+
+class Head extends Program {
+    onRun(counter) {
+        this.counter = Number.parseInt(counter);
+
+        if (Number.isNaN(this.counter)) {
+            this.stderr.writeText('head: invalid number of lines');
+            return 1;
+        }
+
+        if (this.counter <= 0)
+            return 0;
+
+        this.inputEnabled = true;
+    }
+
+    onInput(str) {
+        this.stdout.writeText(str);
+        --this.counter;
+
+        if (this.counter === 0) {
+            this.exit(0);
+            return;
+        }
+    }
+}
+
+class Tail extends Program {
+    onRun(counter) {
+        this.counter = Number.parseInt(counter);
+
+        if (Number.isNaN(this.counter)) {
+            this.stderr.writeText('tail: invalid number of lines');
+            return 1;
+        }
+
+        if (this.counter <= 0)
+            return 0;
+
+        this.inputEnabled = true;
+        this.lines = [];
+    }
+
+    onInput(str) {
+        if (this.lines.length === this.counter)
+            this.lines.shift();
+
+        this.lines.push(str);
+    }
+
+    onEOF() {
+        for (let line of this.lines)
+            this.stdout.writeText(line);
+        this.exit(0);
     }
 }
 
@@ -640,20 +755,6 @@ class Sleep extends Program {
     }
 }
 
-class Echo extends Program {
-    onRun() {
-        this.stdout.writeText(this.args.join(' '));
-        return 0;
-    }
-}
-
-class Print extends Program {
-    onRun() {
-        this.stdout.write(this.args.join(' '));
-        return 0;
-    }
-}
-
 class Clear extends Program {
     onRun() {
         const output = document.getElementById('output');
@@ -664,29 +765,22 @@ class Clear extends Program {
     }
 }
 
-class False extends Program {
-    onRun() {
-        return 1;
-    }
-}
-
 const bin = {
     'sh': Shell,
     'js': Interpreter,
     'cat': Cat,
+    'tee': Tee,
     'ls': List,
     'rm': Remove,
     'curl': Curl,
+    'head': Head,
+    'tail': Tail,
     'sleep': Sleep,
-    'echo': Echo,
-    'print': Print,
-    'clear': Clear,
-    'false': False
+    'clear': Clear
 };
 
 let term = null;
 let termErr = null;
-let program = null;
 
 term = new Term();
 termErr = new TermError();
