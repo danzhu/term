@@ -16,68 +16,77 @@ class Program {
     constructor(parent = null) {
         this.prompt = '';
         this.exitInput = '';
+        this.inputEnabled = false;
         this.echo = true;
+        this.password = false;
         this.history = [];
         this.variables = parent ? new Map(parent.variables) : new Map();
 
         this.stdin = term;
         this.stdout = term;
-        this.stderr = term;
+        this.stderr = termErr;
     }
 
     execute(args = []) {
         this.args = args;
         programs.push(this);
 
-        let res = this.run.apply(this, args);
+        let res = this.onRun.apply(this, args);
 
         if (typeof res === 'number')
             this.exit(res);
     }
 
-    run() {
-        // TODO: throw
-    }
-
-    eof() {
-        this.exit();
-    }
-
-    terminate() {
-        this.exit(130);
-    }
-
     exit(code = 0) {
+        let idx = programs.indexOf(this);
+
         // ignore exit request if already exited
-        if (this != programs[programs.length - 1])
+        if (idx === -1)
             return;
+
+        // FIXME: this might not be the correct chain-terminate behaviour
+        for (let i = programs.length - 1; i > idx; --i)
+            programs[i].exit();
 
         programs.pop();
 
-        // notify parent program
         let parent = programs[programs.length - 1];
-        if (parent)
-            parent.finish(this, code);
+        if (!parent)
+            return;
+
+        // reset input and notify parent program
+        parent.stdin.clearInput();
+        parent.onReturn(this, code);
     }
 
-    input(msg, error = false) {
+    onRun() {
+        // TODO: throw
+    }
+
+    onEOF() {
+        this.exit();
+    }
+
+    onTerminate() {
+        this.exit(130);
+    }
+
+    onInput(msg, error = false) {
         // ignore
     }
 
-    finish(prog, code) {
+    onReturn(prog, code) {
         // ignore
     }
 
-    writeRaw(content) {
-        this.stdout.input(content);
+    write(content) {
+        if (!this.inputEnabled)
+            return;
+        this.onInput(content);
     }
 
     writeText(msg) {
-        this.stdout.input(escapeHTML(msg));
-    }
-
-    writeError(msg) {
-        this.stderr.input(escapeHTML(msg), true);
+        this.write(escapeHTML(msg));
     }
 
     writeHistory(prompt, input) {
@@ -100,6 +109,9 @@ class Program {
 class Term extends Program {
     constructor() {
         super();
+        this.inputEnabled = true;
+        this.stdin = this.stdout = this.stderr = null;
+
         this.inputContent = '';
         this.inputNewest = '';
         this.inputCursor = 0;
@@ -114,7 +126,7 @@ class Term extends Program {
         this.outputElement = document.getElementById('output');
     }
 
-    input(msg, error = false) {
+    onInput(msg, error = false) {
         if (typeof msg !== 'string')
             msg = escapeHTML(msg.toString());
 
@@ -134,7 +146,7 @@ class Term extends Program {
     }
 
     writeHistory(prompt, input) {
-        this.input(
+        this.onInput(
             span(prompt, 'prompt') +
             span(escapeHTML(input), 'input')
         );
@@ -145,8 +157,12 @@ class Term extends Program {
     }
 
     clearInput() {
+        let prog = programs[programs.length - 1];
+
         this.inputNewest = this.inputContent = '';
         this.inputCursor = 0;
+        if (prog)
+            this.inputHistory = prog.history.length;
     }
 
     updateInput() {
@@ -154,12 +170,17 @@ class Term extends Program {
 
         this.promptElement.innerHTML = prog ? prog.prompt : '';
 
+        let content = this.inputContent;
+
+        // password mask
+        if (prog && prog.password)
+            content = '*'.repeat(content.length);
+
+        // disabled input
         if (!prog || !prog.inputEnabled) {
-            this.inputElement.innerHTML = this.inputContent;
+            this.inputElement.innerHTML = content;
             return;
         }
-
-        let content = this.inputContent;
 
         let cursor = '<span id="cursor">' +
             escapeHTML(content.substr(this.inputCursor, 1) || ' ') +
@@ -172,6 +193,17 @@ class Term extends Program {
     }
 }
 
+class TermError extends Program {
+    constructor() {
+        super();
+        this.stdin = this.stdout = this.stderr = null;
+    }
+
+    write(content) {
+        term.write(span(content, 'error'));
+    }
+}
+
 document.addEventListener('keypress', e => {
     let prog = programs[programs.length - 1];
 
@@ -179,17 +211,23 @@ document.addEventListener('keypress', e => {
         return;
 
     if (e.keyCode === 13) { // Enter key
-        if (prog.echo)
-            prog.stdin.writeHistory(prog.prompt, term.inputContent);
+        if (prog.echo) {
+            let content = prog.password ?
+                '*'.repeat(term.inputContent.length) :
+                term.inputContent;
+            prog.stdin.writeHistory(prog.prompt, content);
+        }
 
-        prog.input(term.inputContent);
+        let content = term.inputContent;
+
+        prog.onInput(term.inputContent);
 
         // remove duplicate history and add new entry
-        if (term.inputContent.trim()) {
-            let idx = prog.history.indexOf(term.inputContent);
+        if (!prog.password && content.trim()) {
+            let idx = prog.history.indexOf(content);
             if (idx !== -1)
                 prog.history.splice(idx, 1);
-            prog.history.push(term.inputContent);
+            prog.history.push(content);
         }
 
         prog.stdin.clearInput();
@@ -218,7 +256,7 @@ document.addEventListener('keydown', e => {
     if (e.ctrlKey && e.key == 'c') {
         prog.stdin.clearInput();
 
-        prog.terminate();
+        prog.onTerminate();
 
         prog.stdin.updateInput();
         e.preventDefault();
@@ -239,7 +277,7 @@ document.addEventListener('keydown', e => {
                 if (prog.echo || prog.exitInput)
                     prog.stdin.writeHistory(prog.prompt, prog.exitInput);
 
-                prog.eof();
+                prog.onEOF();
                 break;
         }
 
@@ -293,6 +331,15 @@ document.addEventListener('keydown', e => {
             }
             break;
 
+        case 'Delete':
+            if (term.inputCursor < term.inputContent.length) {
+                term.inputNewest = term.inputContent =
+                    term.inputContent.substr(0, term.inputCursor) +
+                    term.inputContent.substr(term.inputCursor + 1);
+                prog.stdin.updateInput();
+            }
+            break;
+
         case 'Tab':
             // TODO: completion
             break;
@@ -309,16 +356,16 @@ document.addEventListener('keydown', e => {
 });
 
 class Shell extends Program {
-    run(script) {
-        this.writeText('Term v0.1');
+    onRun(script) {
+        this.stdout.writeText('Term v0.1');
 
         this.exitInput = 'exit';
         this.inputEnabled = true;
 
-        this.finish(null, 0);
+        this.onReturn(null, 0);
     }
 
-    input(str) {
+    onInput(str) {
         str = str.trim();
 
         // TODO: parse parameters
@@ -352,13 +399,14 @@ class Shell extends Program {
 
         switch (cmd) {
             case 'history':
-                this.writeText(this.history.join('\n'));
+                this.stdout.writeText(this.history.join('\n'));
                 break;
 
             case 'exit':
                 let code = Number.parseInt(args[0]);
                 if (Number.isNaN(code)) {
-                    this.writeError('exit: ' + args[0] + ': numeric argument required');
+                    this.stderr.writeText('exit: ' +
+                        args[0] + ': numeric argument required');
                     code = 2;
                 }
                 this.exit(code);
@@ -366,8 +414,8 @@ class Shell extends Program {
 
             default:
                 if (!bin[cmd]) {
-                    this.writeError('command not found: ' + cmd);
-                    this.finish(null, 127);
+                    this.stderr.writeText('command not found: ' + cmd);
+                    this.onReturn(null, 127);
                     break;
                 }
 
@@ -375,39 +423,39 @@ class Shell extends Program {
                 try {
                     prog.execute(args);
                 } catch (e) {
-                    this.writeError('sh: ' + e.toString());
+                    this.stderr.writeText('sh: ' + e.toString());
                 }
                 break;
         }
     }
 
-    terminate() {
+    onTerminate() {
         // ignore
     }
 
-    finish(prog, code) {
+    onReturn(prog, code) {
         this.variables.set('?', code);
         this.prompt = code ? span('$ ', 'error') : '$ ';
     }
 }
 
 class Interpreter extends Program {
-    run() {
+    onRun() {
         this.prompt = '> '
         this.inputEnabled = true;
     }
 
-    input(str) {
+    onInput(str) {
         try {
-            this.writeText(String(eval(str)));
+            this.stdout.writeText(String(eval(str)));
         } catch (e) {
-            this.writeError(e.toString());
+            this.stderr.writeText(e.toString());
         }
     }
 }
 
 class Cat extends Program {
-    run(file) {
+    onRun(file) {
         if (!file) {
             this.inputEnabled = true;
             return;
@@ -415,35 +463,35 @@ class Cat extends Program {
 
         let content = localStorage.getItem(file);
         if (content === null) {
-            this.writeError('cat: ' + file + ': no such file');
+            this.stderr.writeText('cat: ' + file + ': no such file');
             return 1;
         }
 
-        this.writeText(content);
+        this.stdout.writeText(content);
         return 0;
     }
 
-    input(str) {
-        this.writeText(str);
+    onInput(str) {
+        this.stdout.writeText(str);
     }
 }
 
 class List extends Program {
-    run() {
+    onRun() {
         let list = [];
         for (let name in localStorage)
             list.push(name);
 
         if (list.length !== 0)
-            this.writeText(list);
+            this.stdout.writeText(list);
         this.exit();
     }
 }
 
 class Remove extends Program {
-    run(file) {
+    onRun(file) {
         if (!file) {
-            this.writeError('rm: missing operand');
+            this.stderr.writeText('rm: missing operand');
             return 1;
         }
 
@@ -453,9 +501,9 @@ class Remove extends Program {
 }
 
 class Curl extends Program {
-    run(url) {
+    onRun(url) {
         if (!url) {
-            this.writeError('curl: missing url');
+            this.stderr.writeText('curl: missing url');
             return 1;
         }
 
@@ -466,7 +514,7 @@ class Curl extends Program {
                 this.exit(1);
                 return;
             }
-            this.writeText(req.responseText);
+            this.stdout.writeText(req.responseText);
             this.stdin.updateInput();
             this.exit();
         };
@@ -475,9 +523,9 @@ class Curl extends Program {
 }
 
 class Sleep extends Program {
-    run(time) {
+    onRun(time) {
         if (!time) {
-            this.writeError('sleep: missing operand');
+            this.stderr.writeText('sleep: missing operand');
             return 1;
         }
 
@@ -489,21 +537,21 @@ class Sleep extends Program {
 }
 
 class Echo extends Program {
-    run() {
-        this.writeText([...arguments].join(' '));
+    onRun() {
+        this.stdout.writeText(this.args.join(' '));
         return 0;
     }
 }
 
 class Print extends Program {
-    run() {
-        this.writeRaw([...arguments].join(' '));
+    onRun() {
+        this.writeRaw(this.args.join(' '));
         return 0;
     }
 }
 
 class Clear extends Program {
-    run() {
+    onRun() {
         const output = document.getElementById('output');
         while (output.lastChild)
             output.removeChild(output.lastChild);
@@ -513,7 +561,7 @@ class Clear extends Program {
 }
 
 class False extends Program {
-    run() {
+    onRun() {
         return 1;
     }
 }
@@ -533,9 +581,10 @@ const bin = {
 };
 
 let term = null;
+let termErr = null;
 term = new Term();
+termErr = new TermError();
 
 let sh = new Shell();
-programs.push(sh);
-sh.run(['-']);
+sh.execute(['-']);
 term.updateInput();

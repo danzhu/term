@@ -48,12 +48,12 @@ body {
 
     50% {
         background-color: transparent;
-        color: lightgrey;
+        color: inherit;
     }
 
     90% {
         background-color: transparent;
-        color: lightgrey;
+        color: inherit;
     }
 
     100% {
