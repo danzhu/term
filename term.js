@@ -10,6 +10,10 @@ function escapeHTML(str) {
         .replace(/>/g, '&gt;');
 }
 
+const READY = Symbol('ready');
+const RUNNING = Symbol('running');
+const TERMINATED = Symbol('terminated');
+
 class Program {
     constructor(parent = null) {
         this.prompt = '';
@@ -18,21 +22,31 @@ class Program {
         this.echo = true;
         this.password = false;
         this.history = [];
+        this.historyIndex = 0;
         this.parent = parent;
         this.children = new Set();
+        this.siblings = [this];
         this.variables = parent ? new Map(parent.variables) : new Map();
+
+        this.state = READY;
 
         this.stdin = term;
         this.stdout = term;
         this.stderr = termErr;
-
-        if (parent)
-            parent.children.add(this);
     }
 
     execute(args = []) {
+        if (this.state !== READY)
+            return;
+
+        this.state = RUNNING;
         this.args = args;
-        term.stdout = this;
+
+        if (this === this.siblings[0])
+            term.stdout = this;
+
+        if (this.parent)
+            this.parent.children.add(this);
 
         let res = this.onRun.apply(this, args);
 
@@ -41,35 +55,48 @@ class Program {
     }
 
     exit(code = 0) {
+        if (this.state !== RUNNING)
+            return;
+
         for (let child of this.children)
             child.exit();
 
-        if (this.parent)
-            this.parent.children.delete(this);
+        this.state = TERMINATED;
+        this.inputEnabled = false;
 
-        term.stdout = this.parent;
+        this.stdout.onEOF();
+        this.stderr.onEOF();
 
-        if (!this.parent)
+        if (!this.parent) {
+            term.stdout = null;
             return;
+        }
 
-        // reset input and notify parent program
-        this.parent.stdin.clearInput();
+        // update and notify parent process
+        this.parent.children.delete(this);
         this.parent.onReturn(this, code);
+
+        if (this.siblings.every(e => e.state === TERMINATED)) {
+            // return control to first process in pipeline
+            term.stdout = this.parent.siblings[0];
+            term.updateInput();
+        }
     }
 
     onRun() {
-        // TODO: throw
+        // ignore
     }
 
     onEOF() {
-        this.exit();
+        if (this.inputEnabled)
+            this.exit();
     }
 
     onTerminate() {
         this.exit(130);
     }
 
-    onInput(msg, error = false) {
+    onInput(msg) {
         // ignore
     }
 
@@ -78,7 +105,7 @@ class Program {
     }
 
     write(content) {
-        if (!this.inputEnabled)
+        if (this.state !== RUNNING || !this.inputEnabled)
             return;
         this.onInput(content);
     }
@@ -113,7 +140,6 @@ class Term extends Program {
         this.inputContent = '';
         this.inputNewest = '';
         this.inputCursor = 0;
-        this.inputHistory = 0;
 
         this.scrollOnInput = true;
         this.scrollOnOutput = true;
@@ -134,12 +160,12 @@ class Term extends Program {
                     let content = prog.password ?
                         '*'.repeat(term.inputContent.length) :
                         term.inputContent;
-                    prog.stdin.writeHistory(prog.prompt, content);
+                    this.writeHistory(prog.prompt, content);
                 }
 
                 let content = term.inputContent;
 
-                prog.onInput(term.inputContent);
+                prog.write(term.inputContent);
 
                 // remove duplicate history and add new entry
                 if (!prog.password && content.trim()) {
@@ -149,7 +175,7 @@ class Term extends Program {
                     prog.history.push(content);
                 }
 
-                prog.stdin.clearInput();
+                this.clearInput();
             } else {
                 term.inputNewest = term.inputContent =
                     term.inputContent.substr(0, term.inputCursor) +
@@ -158,8 +184,8 @@ class Term extends Program {
                 ++term.inputCursor;
             }
 
-            term.inputHistory = prog.history.length;
-            prog.stdin.updateInput();
+            prog.historyIndex = prog.history.length;
+            this.updateInput();
 
             if (term.scrollOnInput)
                 term.termElement.scrollTop = term.termElement.scrollHeight;
@@ -173,11 +199,11 @@ class Term extends Program {
 
             // ctrl + c always works, even when input is disabled
             if (e.ctrlKey && e.key == 'c') {
-                prog.stdin.clearInput();
+                this.clearInput();
 
                 prog.onTerminate();
 
-                prog.stdin.updateInput();
+                this.updateInput();
                 e.preventDefault();
                 return;
             }
@@ -194,13 +220,13 @@ class Term extends Program {
 
                         // echo termination input if available
                         if (prog.echo || prog.exitInput)
-                            prog.stdin.writeHistory(prog.prompt, prog.exitInput);
+                            this.writeHistory(prog.prompt, prog.exitInput);
 
                         prog.onEOF();
                         break;
                 }
 
-                prog.stdin.updateInput();
+                this.updateInput();
                 e.preventDefault();
                 return;
             }
@@ -209,35 +235,35 @@ class Term extends Program {
                 case 'ArrowLeft':
                     if (term.inputCursor > 0) {
                         --term.inputCursor;
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
                 case 'ArrowRight':
                     if (term.inputCursor < term.inputContent.length) {
                         ++term.inputCursor;
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
                 case 'ArrowUp':
-                    if (term.inputHistory > 0) {
-                        --term.inputHistory;
-                        term.inputContent = prog.history[term.inputHistory];
+                    if (prog.historyIndex > 0) {
+                        --prog.historyIndex;
+                        term.inputContent = prog.history[prog.historyIndex];
                         term.inputCursor = term.inputContent.length;
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
                 case 'ArrowDown':
-                    if (term.inputHistory < prog.history.length) {
-                        ++term.inputHistory;
+                    if (prog.historyIndex < prog.history.length) {
+                        ++prog.historyIndex;
                         term.inputContent =
-                            term.inputHistory === prog.history.length ?
+                            prog.historyIndex === prog.history.length ?
                             term.inputNewest :
-                            prog.history[term.inputHistory];
+                            prog.history[prog.historyIndex];
                         term.inputCursor = term.inputContent.length;
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
@@ -247,7 +273,7 @@ class Term extends Program {
                             term.inputContent.substr(0, term.inputCursor - 1) +
                             term.inputContent.substr(term.inputCursor);
                         --term.inputCursor;
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
@@ -256,7 +282,7 @@ class Term extends Program {
                         term.inputNewest = term.inputContent =
                             term.inputContent.substr(0, term.inputCursor) +
                             term.inputContent.substr(term.inputCursor + 1);
-                        prog.stdin.updateInput();
+                        this.updateInput();
                     }
                     break;
 
@@ -283,15 +309,16 @@ class Term extends Program {
         this.updateInput();
     }
 
-    onInput(msg, error = false) {
+    onEOF() {
+        // ignore
+    }
+
+    onInput(msg) {
         if (typeof msg !== 'string')
             msg = escapeHTML(msg.toString());
 
         if (!msg)
             msg = '\n';
-
-        if (error)
-            msg = span(msg, 'error');
 
         let div = document.createElement('pre');
         div.innerHTML = msg;
@@ -303,7 +330,7 @@ class Term extends Program {
     }
 
     writeHistory(prompt, input) {
-        this.onInput(
+        this.write(
             span(prompt, 'prompt') +
             span(escapeHTML(input), 'input')
         );
@@ -319,7 +346,7 @@ class Term extends Program {
         this.inputNewest = this.inputContent = '';
         this.inputCursor = 0;
         if (prog)
-            this.inputHistory = prog.history.length;
+            prog.historyIndex = prog.history.length;
     }
 
     updateInput() {
@@ -354,25 +381,66 @@ class TermError extends Program {
     constructor() {
         super();
         this.stdin = this.stdout = this.stderr = null;
+        this.inputEnabled = true;
     }
 
-    write(content) {
+    onEOF() {
+        // ignore
+    }
+
+    onInput(content) {
         term.write(span(content, 'error'));
     }
 }
 
-class Shell extends Program {
-    onRun(script) {
-        this.stdout.writeText('Term v0.1');
+class Monitor extends Program {
+    constructor(parent, callback, eof = null) {
+        super(parent);
+        this.callback = callback;
+        this.eof = eof;
+        this.inputEnabled = true;
+    }
 
+    onEOF() {
+        if (this.eof)
+            this.eof();
+        else
+            super.onEOF();
+    }
+
+    onInput(str) {
+        this.callback(str);
+    }
+}
+
+class Printer extends Program {
+    constructor(parent, content) {
+        super(parent);
+        this.content = content;
+    }
+
+    onRun() {
+        this.stdout.writeText(this.content);
+        return 0;
+    }
+}
+
+class Shell extends Program {
+    constructor(parent) {
+        super(parent);
         this.exitInput = 'exit';
         this.inputEnabled = true;
+        this.setPrompt(0);
+    }
 
-        this.onReturn(null, 0);
+    onRun(script) {
+        this.stdout.writeText('Term v0.1');
     }
 
     onInput(str) {
         str = str.trim();
+
+        // TODO: multiline
 
         // TODO: parse parameters
         let params = str.split(' ').filter(e => e.length !== 0);
@@ -382,7 +450,7 @@ class Shell extends Program {
         for (let i = params.length - 1; i >= 0; --i) {
             if (params[i][0] === '$') {
                 let val = this.variables.get(params[i].substr(1));
-                params[i] = val !== undefined ? val.toString() : '';
+                params[i] = val || '';
             }
         }
 
@@ -401,37 +469,38 @@ class Shell extends Program {
         if (params.length === 0)
             return;
 
-        let [cmd, ...args] = params;
+        let programs = [[]];
 
-        switch (cmd) {
-            case 'history':
-                this.stdout.writeText(this.history.join('\n'));
-                break;
+        for (let i = 0; i < params.length; ++i) {
+            if (params[i] === '|') {
+                programs.push([]);
+                continue;
+            }
 
-            case 'exit':
-                let code = Number.parseInt(args[0]);
-                if (Number.isNaN(code)) {
-                    this.stderr.writeText('exit: ' +
-                        args[0] + ': numeric argument required');
-                    code = 2;
-                }
-                this.exit(code);
-                break;
+            programs[programs.length - 1].push(params[i]);
+        }
 
-            default:
-                if (!bin[cmd]) {
-                    this.stderr.writeText('command not found: ' + cmd);
-                    this.onReturn(null, 127);
-                    break;
-                }
+        let processes = programs.map(e => this.createProcess(e[0]));
 
-                let prog = new bin[cmd](this);
-                try {
-                    prog.execute(args);
-                } catch (e) {
-                    this.stderr.writeText('sh: ' + e.toString());
-                }
-                break;
+        if (processes.some(e => !e)) {
+            this.setPrompt(127);
+            return;
+        }
+
+        let args = programs.map(e => e.slice(1));
+
+        this.last = processes[processes.length - 1];
+
+        for (let i = 0; i < processes.length; ++i) {
+            processes[i].siblings = processes;
+            if (i > 0)
+                processes[i].stdin = processes[i - 1];
+            if (i < processes.length - 1)
+                processes[i].stdout = processes[i + 1];
+        }
+
+        for (let i = processes.length - 1; i >= 0; --i) {
+            processes[i].execute(args[i]);
         }
     }
 
@@ -440,13 +509,44 @@ class Shell extends Program {
     }
 
     onReturn(prog, code) {
+        // ignore all but last program
+        if (prog === this.last)
+            this.setPrompt(code);
+    }
+
+    setPrompt(code) {
         this.variables.set('?', code);
         this.prompt = code ? span('$ ', 'error') : '$ ';
+    }
+
+    createProcess(cmd) {
+        switch (cmd) {
+            case 'history':
+                return new Printer(this, this.history.join('\n'));
+
+            // case 'exit':
+            //     let code = Number.parseInt(args[0]);
+            //     if (Number.isNaN(code)) {
+            //         this.stderr.writeText('exit: ' +
+            //             args[0] + ': numeric argument required');
+            //         code = 2;
+            //     }
+            //     this.exit(code);
+            //     break;
+        }
+
+        if (!bin[cmd]) {
+            this.stderr.writeText('sh: command not found: ' + cmd);
+            return;
+        }
+
+        return new bin[cmd](this);
     }
 }
 
 class Interpreter extends Program {
-    onRun() {
+    constructor(parent) {
+        super(parent);
         this.prompt = '> '
         this.inputEnabled = true;
     }
@@ -490,7 +590,7 @@ class List extends Program {
 
         if (list.length !== 0)
             this.stdout.writeText(list);
-        this.exit();
+        return 0;
     }
 }
 
@@ -521,7 +621,6 @@ class Curl extends Program {
                 return;
             }
             this.stdout.writeText(req.responseText);
-            this.stdin.updateInput();
             this.exit();
         };
         req.send();
@@ -537,7 +636,6 @@ class Sleep extends Program {
 
         setTimeout(() => {
             this.exit();
-            this.stdin.updateInput();
         }, Number.parseFloat(time) * 1000);
     }
 }
@@ -593,4 +691,5 @@ let program = null;
 term = new Term();
 termErr = new TermError();
 
+termErr.execute();
 term.execute([Shell]);
