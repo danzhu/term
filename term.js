@@ -14,6 +14,60 @@ const READY = Symbol('ready');
 const RUNNING = Symbol('running');
 const TERMINATED = Symbol('terminated');
 
+class Output {
+    constructor(content) {
+        this.content = content;
+    }
+
+    str() {
+        return this.content;
+    }
+
+    print() {
+        return this.str();
+    }
+
+    items() {
+        return [this];
+    }
+}
+
+class RawOutput extends Output {
+}
+
+class TextOutput extends Output {
+    print() {
+        return escapeHTML(this.content);
+    }
+
+    items() {
+        return this.content.split('\n').map(e => new TextOutput(e));
+    }
+}
+
+class ArrayOutput extends Output {
+    str() {
+        return this.content.map(e => e.str()).join('\n');
+    }
+
+    print() {
+        // TODO: formatted print
+        return this.content.map(e => e.print()).join('\n');
+    }
+
+    items() {
+        return this.content;
+    }
+}
+
+class ObjectOutput extends Output {
+    str() {
+        return String(this.content);
+    }
+
+    // TODO: formatted print
+}
+
 class Program {
     constructor(parent = null) {
         this.prompt = '';
@@ -29,6 +83,7 @@ class Program {
         this.variables = parent ? new Map(parent.variables) : new Map();
 
         this.state = READY;
+        this.tty = false;
 
         this.stdin = term;
         this.stdout = term;
@@ -48,42 +103,86 @@ class Program {
         if (this.parent)
             this.parent.children.add(this);
 
-        let res = this.onRun.apply(this, args);
+        let res = this.onExecute.apply(this, args);
 
         if (typeof res === 'number')
             this.exit(res);
+    }
+
+    eof() {
+        if (this.state !== RUNNING)
+            return;
+        this.onEOF();
+    }
+
+    interrupt() {
+        if (this.state !== RUNNING)
+            return;
+        this.onInterrupt();
     }
 
     exit(code = 0) {
         if (this.state !== RUNNING)
             return;
 
-        for (let child of this.children)
-            child.exit();
-
         this.state = TERMINATED;
         this.inputEnabled = false;
 
-        this.stdout.onEOF();
-        this.stderr.onEOF();
+        for (let child of this.children)
+            child.exit();
+
+        this.stdout.eof();
+        this.stderr.eof();
 
         if (!this.parent) {
             term.stdout = null;
             return;
         }
 
+        if (this.commandReturned()) {
+            // return control to first process in pipeline
+            let first = this.parent.siblings[0];
+            first.stdin.stdout = first;
+            first.stdin.updateInput();
+        }
+
         // update and notify parent process
         this.parent.children.delete(this);
-        this.parent.onReturn(this, code);
-
-        if (this.siblings.every(e => e.state === TERMINATED)) {
-            // return control to first process in pipeline
-            term.stdout = this.parent.siblings[0];
-            term.updateInput();
-        }
+        if (this.parent.state === RUNNING)
+            this.parent.onReturn(this, code);
     }
 
-    onRun() {
+    write(content) {
+        if (this.state !== RUNNING || !this.inputEnabled)
+            return;
+        this.onInput(content);
+    }
+
+    writeRaw(content) {
+        this.write(new RawOutput(content));
+    }
+
+    writeText(msg) {
+        this.write(new TextOutput(msg));
+    }
+
+    writeHistory(prompt, input) {
+        // ignore
+    }
+
+    clearInput() {
+        // ignore
+    }
+
+    updateInput() {
+        // ignore
+    }
+
+    commandReturned() {
+        return this.siblings.every(e => e.state === TERMINATED)
+    }
+
+    onExecute() {
         // ignore
     }
 
@@ -92,7 +191,9 @@ class Program {
             this.exit();
     }
 
-    onTerminate() {
+    onInterrupt() {
+        if (this.parent)
+            this.parent.interrupt();
         this.exit(130);
     }
 
@@ -103,38 +204,13 @@ class Program {
     onReturn(prog, code) {
         // ignore
     }
-
-    write(content) {
-        if (this.state !== RUNNING || !this.inputEnabled)
-            return;
-        this.onInput(content);
-    }
-
-    writeText(msg) {
-        this.write(msg);
-    }
-
-    writeHistory(prompt, input) {
-        // ignore
-    }
-
-    changeOutput(msg) {
-        // TODO: somehow throw
-    }
-
-    clearInput() {
-        // ignore
-    }
-
-    updateInput() {
-        // ignore
-    }
 }
 
 class Term extends Program {
     constructor() {
         super();
         this.inputEnabled = true;
+        this.tty = true;
 
         this.inputContent = '';
         this.inputNewest = '';
@@ -157,14 +233,14 @@ class Term extends Program {
             if (e.keyCode === 13) { // Enter key
                 if (prog.echo) {
                     let content = prog.password ?
-                        '*'.repeat(term.inputContent.length) :
-                        term.inputContent;
+                        '*'.repeat(this.inputContent.length) :
+                        this.inputContent;
                     this.writeHistory(prog.prompt, content);
                 }
 
-                let content = term.inputContent;
+                let content = this.inputContent;
 
-                prog.write(term.inputContent);
+                prog.writeText(this.inputContent);
 
                 // remove duplicate history and add new entry
                 if (!prog.password && content.trim()) {
@@ -176,18 +252,18 @@ class Term extends Program {
 
                 this.clearInput();
             } else {
-                term.inputNewest = term.inputContent =
-                    term.inputContent.substr(0, term.inputCursor) +
+                this.inputNewest = this.inputContent =
+                    this.inputContent.substr(0, this.inputCursor) +
                     String.fromCharCode(e.which) +
-                    term.inputContent.substr(term.inputCursor);
-                ++term.inputCursor;
+                    this.inputContent.substr(this.inputCursor);
+                ++this.inputCursor;
             }
 
             prog.historyIndex = prog.history.length;
             this.updateInput();
 
-            if (term.scrollOnInput)
-                term.termElement.scrollTop = term.termElement.scrollHeight;
+            if (this.scrollOnInput)
+                this.termElement.scrollTop = this.termElement.scrollHeight;
         });
 
         document.addEventListener('keydown', e => {
@@ -200,7 +276,7 @@ class Term extends Program {
             if (e.ctrlKey && e.key == 'c') {
                 this.clearInput();
 
-                prog.onTerminate();
+                prog.interrupt();
 
                 this.updateInput();
                 e.preventDefault();
@@ -214,14 +290,14 @@ class Term extends Program {
                 switch (e.key) {
                     case 'd':
                         // prevent EOF when not on empty line
-                        if (term.inputContent !== '')
+                        if (this.inputContent !== '')
                             break;
 
                         // echo termination input if available
                         if (prog.echo || prog.exitInput)
                             this.writeHistory(prog.prompt, prog.exitInput);
 
-                        prog.onEOF();
+                        prog.eof();
                         break;
                 }
 
@@ -232,15 +308,15 @@ class Term extends Program {
 
             switch (e.key) {
                 case 'ArrowLeft':
-                    if (term.inputCursor > 0) {
-                        --term.inputCursor;
+                    if (this.inputCursor > 0) {
+                        --this.inputCursor;
                         this.updateInput();
                     }
                     break;
 
                 case 'ArrowRight':
-                    if (term.inputCursor < term.inputContent.length) {
-                        ++term.inputCursor;
+                    if (this.inputCursor < this.inputContent.length) {
+                        ++this.inputCursor;
                         this.updateInput();
                     }
                     break;
@@ -248,8 +324,8 @@ class Term extends Program {
                 case 'ArrowUp':
                     if (prog.historyIndex > 0) {
                         --prog.historyIndex;
-                        term.inputContent = prog.history[prog.historyIndex];
-                        term.inputCursor = term.inputContent.length;
+                        this.inputContent = prog.history[prog.historyIndex];
+                        this.inputCursor = this.inputContent.length;
                         this.updateInput();
                     }
                     break;
@@ -257,30 +333,30 @@ class Term extends Program {
                 case 'ArrowDown':
                     if (prog.historyIndex < prog.history.length) {
                         ++prog.historyIndex;
-                        term.inputContent =
+                        this.inputContent =
                             prog.historyIndex === prog.history.length ?
-                            term.inputNewest :
+                            this.inputNewest :
                             prog.history[prog.historyIndex];
-                        term.inputCursor = term.inputContent.length;
+                        this.inputCursor = this.inputContent.length;
                         this.updateInput();
                     }
                     break;
 
                 case 'Backspace':
-                    if (term.inputCursor > 0) {
-                        term.inputNewest = term.inputContent =
-                            term.inputContent.substr(0, term.inputCursor - 1) +
-                            term.inputContent.substr(term.inputCursor);
-                        --term.inputCursor;
+                    if (this.inputCursor > 0) {
+                        this.inputNewest = this.inputContent =
+                            this.inputContent.substr(0, this.inputCursor - 1) +
+                            this.inputContent.substr(this.inputCursor);
+                        --this.inputCursor;
                         this.updateInput();
                     }
                     break;
 
                 case 'Delete':
-                    if (term.inputCursor < term.inputContent.length) {
-                        term.inputNewest = term.inputContent =
-                            term.inputContent.substr(0, term.inputCursor) +
-                            term.inputContent.substr(term.inputCursor + 1);
+                    if (this.inputCursor < this.inputContent.length) {
+                        this.inputNewest = this.inputContent =
+                            this.inputContent.substr(0, this.inputCursor) +
+                            this.inputContent.substr(this.inputCursor + 1);
                         this.updateInput();
                     }
                     break;
@@ -296,13 +372,13 @@ class Term extends Program {
 
             e.preventDefault();
 
-            if (term.scrollOnInput)
-                term.termElement.scrollTop = term.termElement.scrollHeight;
+            if (this.scrollOnInput)
+                this.termElement.scrollTop = this.termElement.scrollHeight;
         });
 
     }
 
-    onRun(shell) {
+    onExecute(shell) {
         this.sh = new shell();
         this.sh.execute(['-']);
         this.updateInput();
@@ -312,15 +388,9 @@ class Term extends Program {
         // ignore
     }
 
-    onInput(msg) {
-        if (typeof msg !== 'string')
-            msg = escapeHTML(msg.toString());
-
-        if (!msg)
-            msg = '\n';
-
+    onInput(content) {
         let div = document.createElement('pre');
-        div.innerHTML = msg;
+        div.innerHTML = content.print();
         this.outputElement.appendChild(div);
 
         // FIXME: always scroll if at bottom
@@ -328,19 +398,11 @@ class Term extends Program {
             this.termElement.scrollTop = this.termElement.scrollHeight;
     }
 
-    writeText(msg) {
-        this.write(escapeHTML(msg));
-    }
-
     writeHistory(prompt, input) {
-        this.write(
+        this.writeRaw(
             span(prompt, 'prompt') +
             span(escapeHTML(input), 'input')
         );
-    }
-
-    changeOutput(msg) {
-        this.outputElement.lastChild.innerHTML = msg;
     }
 
     clearInput() {
@@ -384,6 +446,7 @@ class TermError extends Program {
     constructor() {
         super();
         this.inputEnabled = true;
+        this.tty = true;
     }
 
     onEOF() {
@@ -391,7 +454,7 @@ class TermError extends Program {
     }
 
     onInput(content) {
-        this.stdout.write(span(content, 'error'));
+        this.stdout.writeRaw(span(content.print(), 'error'));
     }
 }
 
@@ -421,7 +484,7 @@ class Printer extends Program {
         this.content = content;
     }
 
-    onRun() {
+    onExecute() {
         this.stdout.writeText(this.content);
         return 0;
     }
@@ -433,7 +496,7 @@ class Caller extends Program {
         this.fn = fn;
     }
 
-    onRun() {
+    onExecute() {
         this.fn(this);
         return 0;
     }
@@ -445,40 +508,80 @@ class Shell extends Program {
         this.exitInput = 'exit';
         this.inputEnabled = true;
         this.setPrompt(0);
+
+        this.commandRunning = false;
+        this.commands = [];
     }
 
-    onRun(script) {
-        this.stdout.writeText('Term v0.1');
+    onExecute(script) {
+        if (!this.stdin.tty)
+            return;
+
+        this.stdout.writeText('Term v0.2');
     }
 
-    onInput(str) {
-        str = str.trim();
+    onInput(content) {
+        for (let line of content.str().split('\n')) {
+            this.queueCommand(line);
+        }
 
-        // TODO: multiline
+        this.executeNext();
+    }
 
+    onEOF() {
+        // ignore when there's still command running
+        if (!this.commandRunning)
+            super.onEOF();
+    }
+
+    onInterrupt() {
+        if (!this.stdin.tty) {
+            super.onInterrupt();
+        }
+    }
+
+    onReturn(prog, code) {
+        // ignore all but last program
+        if (prog === prog.siblings[prog.siblings.length - 1]) {
+            this.setPrompt(code);
+        }
+
+        if (prog.commandReturned()) {
+            this.commandRunning = false;
+            this.executeNext();
+
+            // exit when last command ended, and no more input
+            if (this.commands.length === 0 && this.stdin.state === TERMINATED)
+                this.exit();
+        }
+    }
+
+    queueCommand(str) {
         // TODO: parse parameters
         let params = str.split(' ').filter(e => e.length !== 0);
 
-        // resolve variables
-        // TODO: merge with parsing for in-line usage
-        for (let i = params.length - 1; i >= 0; --i) {
-            if (params[i][0] === '$') {
-                let val = this.variables.get(params[i].substr(1));
-                params[i] = val || '';
-            }
-        }
+        // FIXME: move to execution
+        // // resolve variables
+        // // TODO: merge with parsing for in-line usage
+        // for (let i = params.length - 1; i >= 0; --i) {
+        //     if (params[i][0] === '$') {
+        //         let val = this.variables.get(params[i].substr(1));
+        //         params[i] = val || '';
+        //     }
+        // }
 
-        // process variable assignments
-        while (params.length > 0) {
-            let idx = params[0].indexOf('=');
-            if (idx === -1)
-                break;
+        // FIXME: move to execution
+        // // process variable assignments
+        // while (params.length > 0) {
+        //     let idx = params[0].indexOf('=');
+        //     if (idx === -1)
+        //         break;
 
-            let name = params[0].substr(0, idx);
-            let value = params[0].substr(idx + 1);
-            this.variables.set(name, value);
-            params.shift();
-        }
+        //     let name = params[0].substr(0, idx);
+        //     let value = params[0].substr(idx + 1);
+        //     this.variables.set(name, value);
+        //     params.shift();
+        // }
 
         if (params.length === 0)
             return;
@@ -494,13 +597,23 @@ class Shell extends Program {
             programs[programs.length - 1].push(params[i]);
         }
 
-        // detect pipe errors
+        // detect pipe syntax errors
         if (programs.some(e => e.length === 0)) {
             this.stderr.writeText('sh: invalid pipe');
             this.setPrompt(1);
             return;
         }
 
+        this.commands.push(programs);
+    }
+
+    executeNext() {
+        if (this.commandRunning || this.commands.length === 0)
+            return;
+
+        this.commandRunning = true;
+
+        let programs = this.commands.shift();
         let processes = programs.map(e => this.createProcess(e[0]));
 
         // detect non-existent processes
@@ -510,8 +623,6 @@ class Shell extends Program {
         }
 
         let args = programs.map(e => e.slice(1));
-
-        this.last = processes[processes.length - 1];
 
         for (let i = 0; i < processes.length; ++i) {
             processes[i].siblings = processes;
@@ -525,16 +636,6 @@ class Shell extends Program {
         for (let i = processes.length - 1; i >= 0; --i) {
             processes[i].execute(args[i]);
         }
-    }
-
-    onTerminate() {
-        // ignore
-    }
-
-    onReturn(prog, code) {
-        // ignore all but last program
-        if (prog === this.last)
-            this.setPrompt(code);
     }
 
     setPrompt(code) {
@@ -586,9 +687,10 @@ class Interpreter extends Program {
         this.inputEnabled = true;
     }
 
-    onInput(str) {
+    onInput(content) {
         try {
-            this.stdout.writeText(String(eval(str)));
+            for (let item of content.items())
+                this.stdout.write(new ObjectOutput(eval(item.str())));
         } catch (e) {
             this.stderr.writeText(e.toString());
         }
@@ -596,7 +698,7 @@ class Interpreter extends Program {
 }
 
 class Cat extends Program {
-    onRun(file) {
+    onExecute(file) {
         if (!file) {
             this.inputEnabled = true;
             return;
@@ -612,39 +714,35 @@ class Cat extends Program {
         return 0;
     }
 
-    onInput(str) {
-        this.stdout.writeText(str);
+    onInput(content) {
+        this.stdout.write(content);
     }
 }
 
 class Tee extends Program {
-    onRun(file) {
+    onExecute(file) {
         this.content = [];
         this.file = file;
         this.inputEnabled = true;
     }
 
-    onInput(str) {
-        this.content.push(str);
-        this.stdout.writeText(str);
+    onInput(content) {
+        this.content.push(content.str());
+        this.stdout.write(content);
         localStorage.setItem(this.file, this.content.join('\n'));
     }
 }
 
 class List extends Program {
-    onRun() {
-        let list = [];
-        for (let name in localStorage)
-            list.push(name);
-
-        for (let l of list)
-            this.stdout.writeText(l);
+    onExecute() {
+        let list = Object.keys(localStorage).map(e => new TextOutput(e));
+        this.stdout.write(new ArrayOutput(list));
         return 0;
     }
 }
 
 class Remove extends Program {
-    onRun(file) {
+    onExecute(file) {
         if (!file) {
             this.stderr.writeText('rm: missing operand');
             return 1;
@@ -656,7 +754,7 @@ class Remove extends Program {
 }
 
 class Curl extends Program {
-    onRun(url) {
+    onExecute(url) {
         if (!url) {
             this.stderr.writeText('curl: missing url');
             return 1;
@@ -672,26 +770,24 @@ class Curl extends Program {
                 this.exit(1);
                 return;
             }
-            let lines = this.req.responseText.split('\n');
-            for (let line of lines)
-                this.stdout.writeText(line);
+            this.stdout.writeText(this.req.responseText);
             this.exit();
         };
         this.req.send();
     }
 
-    onTerminate() {
+    onInterrupt() {
         this.req.abort();
-        super.onTerminate();
+        super.onInterrupt();
     }
 }
 
 class Head extends Program {
-    onRun(counter) {
+    onExecute(counter) {
         this.counter = Number.parseInt(counter);
 
         if (Number.isNaN(this.counter)) {
-            this.stderr.writeText('head: invalid number of lines');
+            this.stderr.writeText('head: invalid number of items');
             return 1;
         }
 
@@ -701,9 +797,10 @@ class Head extends Program {
         this.inputEnabled = true;
     }
 
-    onInput(str) {
-        this.stdout.writeText(str);
-        --this.counter;
+    onInput(content) {
+        let items = content.items().slice(0, this.counter);
+        this.stdout.write(new ArrayOutput(items));
+        this.counter -= items.length;
 
         if (this.counter === 0) {
             this.exit(0);
@@ -713,11 +810,11 @@ class Head extends Program {
 }
 
 class Tail extends Program {
-    onRun(counter) {
+    onExecute(counter) {
         this.counter = Number.parseInt(counter);
 
         if (Number.isNaN(this.counter)) {
-            this.stderr.writeText('tail: invalid number of lines');
+            this.stderr.writeText('tail: invalid number of items');
             return 1;
         }
 
@@ -725,38 +822,46 @@ class Tail extends Program {
             return 0;
 
         this.inputEnabled = true;
-        this.lines = [];
+        this.items = [];
     }
 
-    onInput(str) {
-        if (this.lines.length === this.counter)
-            this.lines.shift();
+    onInput(content) {
+        for (let item of content.items()) {
+            if (this.items.length === this.counter)
+                this.items.shift();
 
-        this.lines.push(str);
+            this.items.push(item);
+        }
     }
 
     onEOF() {
-        for (let line of this.lines)
-            this.stdout.writeText(line);
+        this.stdout.write(new ArrayOutput(this.items));
         this.exit(0);
     }
 }
 
 class Sleep extends Program {
-    onRun(time) {
-        if (!time) {
-            this.stderr.writeText('sleep: missing operand');
+    onExecute(time) {
+        let t = Number.parseFloat(time);
+
+        if (Number.isNaN(t)) {
+            this.stderr.writeText('sleep: invalid time');
             return 1;
         }
 
-        setTimeout(() => {
+        this.handle = setTimeout(() => {
             this.exit();
-        }, Number.parseFloat(time) * 1000);
+        }, t * 1000);
+    }
+
+    onInterrupt() {
+        clearTimeout(this.handle);
+        super.onInterrupt();
     }
 }
 
 class Clear extends Program {
-    onRun() {
+    onExecute() {
         const output = document.getElementById('output');
         while (output.lastChild)
             output.removeChild(output.lastChild);
