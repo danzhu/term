@@ -33,11 +33,14 @@ class Output {
 }
 
 class RawOutput extends Output {
+    items() {
+        return this.content.split('\n').map(e => new RawOutput(e));
+    }
 }
 
 class TextOutput extends Output {
     print() {
-        return escapeHTML(this.content);
+        return escapeHTML(this.content || '\n');
     }
 
     items() {
@@ -68,6 +71,8 @@ class ObjectOutput extends Output {
     // TODO: formatted print
 }
 
+// TODO: filesystem and net API
+
 class Program {
     constructor(parent = null) {
         this.prompt = '';
@@ -79,15 +84,19 @@ class Program {
         this.historyIndex = 0;
         this.parent = parent;
         this.children = new Set();
-        this.siblings = [this];
+        this.job = [this];
         this.variables = parent ? new Map(parent.variables) : new Map();
 
         this.state = READY;
         this.tty = false;
 
-        this.stdin = term;
-        this.stdout = term;
-        this.stderr = termErr;
+        if (parent) {
+            this.stdin = parent.stdin;
+            this.stdout = parent.stdout;
+            this.stderr = parent.stderr;
+        } else {
+            this.stdin = this.stdout = this.stderr = null;
+        }
     }
 
     execute(args = []) {
@@ -97,8 +106,8 @@ class Program {
         this.state = RUNNING;
         this.args = args;
 
-        if (this === this.siblings[0])
-            term.stdout = this;
+        if (this.stdin.tty)
+            this.stdin.stdout = this;
 
         if (this.parent)
             this.parent.children.add(this);
@@ -118,6 +127,8 @@ class Program {
     interrupt() {
         if (this.state !== RUNNING)
             return;
+
+        // send signal to all processes in job
         this.onInterrupt();
     }
 
@@ -134,14 +145,14 @@ class Program {
         this.stdout.eof();
         this.stderr.eof();
 
-        if (!this.parent) {
-            term.stdout = null;
-            return;
-        }
+        // if (!this.parent) {
+        //     term.stdout = null;
+        //     return;
+        // }
 
-        if (this.commandReturned()) {
+        if (this.jobReturned()) {
             // return control to first process in pipeline
-            let first = this.parent.siblings[0];
+            let first = this.parent.job[0];
             first.stdin.stdout = first;
             first.stdin.updateInput();
         }
@@ -178,8 +189,8 @@ class Program {
         // ignore
     }
 
-    commandReturned() {
-        return this.siblings.every(e => e.state === TERMINATED)
+    jobReturned() {
+        return this.job.every(e => e.state === TERMINATED)
     }
 
     onExecute() {
@@ -204,6 +215,8 @@ class Program {
     onReturn(prog, code) {
         // ignore
     }
+
+    // TODO: args parsing API
 }
 
 class Term extends Program {
@@ -211,6 +224,8 @@ class Term extends Program {
         super();
         this.inputEnabled = true;
         this.tty = true;
+        this.stdin = this.stdout = this;
+        this.stderr = new TermError(this);
 
         this.inputContent = '';
         this.inputNewest = '';
@@ -223,6 +238,8 @@ class Term extends Program {
         this.promptElement = document.getElementById('prompt');
         this.inputElement = document.getElementById('input');
         this.outputElement = document.getElementById('output');
+
+        this.stderr.execute();
 
         document.addEventListener('keypress', e => {
             let prog = this.stdout;
@@ -276,7 +293,9 @@ class Term extends Program {
             if (e.ctrlKey && e.key == 'c') {
                 this.clearInput();
 
-                prog.interrupt();
+                // interrupt every process in job
+                for (let p of prog.job)
+                    p.interrupt();
 
                 this.updateInput();
                 e.preventDefault();
@@ -379,7 +398,7 @@ class Term extends Program {
     }
 
     onExecute(shell) {
-        this.sh = new shell();
+        this.sh = new shell(this);
         this.sh.execute(['-']);
         this.updateInput();
     }
@@ -443,10 +462,11 @@ class Term extends Program {
 }
 
 class TermError extends Program {
-    constructor() {
-        super();
+    constructor(parent) {
+        super(parent);
         this.inputEnabled = true;
         this.tty = true;
+        this.stderr = this;
     }
 
     onEOF() {
@@ -473,8 +493,8 @@ class Monitor extends Program {
             super.onEOF();
     }
 
-    onInput(str) {
-        this.callback(this, str);
+    onInput(content) {
+        this.callback(this, content);
     }
 }
 
@@ -505,33 +525,43 @@ class Caller extends Program {
 class Shell extends Program {
     constructor(parent) {
         super(parent);
-        this.exitInput = 'exit';
         this.inputEnabled = true;
-        this.setPrompt(0);
 
-        this.commandRunning = false;
-        this.commands = [];
+        this.jobRunning = false;
+        this.jobs = [];
+
+        this.exitInput = 'exit';
+        this.setReturnCode(0);
     }
 
     onExecute(script) {
-        if (!this.stdin.tty)
-            return;
+        if (script) {
+            if (script !== '-') {
+                // TODO: run script
+                return;
+            }
 
-        this.stdout.writeText('Term v0.2');
+            // TODO: source .login
+        }
+
+        if (this.stdin.tty) { // interactive
+            this.stdout.writeText('Term v0.2');
+            // TODO: source .shrc
+        }
     }
 
     onInput(content) {
-        for (let line of content.str().split('\n')) {
-            this.queueCommand(line);
+        for (let line of content.str().split(/\n|;/)) {
+            this.queueJob(line);
         }
 
-        this.executeNext();
+        this.nextJob();
     }
 
     onEOF() {
-        // ignore when there's still command running
-        if (!this.commandRunning)
-            super.onEOF();
+        // ignore when there's still job running
+        if (!this.jobRunning)
+            this.exit(this.exitCode);
     }
 
     onInterrupt() {
@@ -541,91 +571,63 @@ class Shell extends Program {
     }
 
     onReturn(prog, code) {
-        // ignore all but last program
-        if (prog === prog.siblings[prog.siblings.length - 1]) {
-            this.setPrompt(code);
+        if (prog === prog.job[prog.job.length - 1]) {
+            // set return code to exit code of last program
+            this.setReturnCode(code);
         }
 
-        if (prog.commandReturned()) {
-            this.commandRunning = false;
-            this.executeNext();
+        if (prog.jobReturned()) {
+            this.jobRunning = false;
 
-            // exit when last command ended, and no more input
-            if (this.commands.length === 0 && this.stdin.state === TERMINATED)
-                this.exit();
+            if (this.jobs.length !== 0) {
+                // there are more jobs, do next one
+                this.nextJob();
+            } else if (this.stdin.state !== TERMINATED) {
+                // no more jobs right now, update input
+                this.stdin.updateInput();
+            } else {
+                // last job ended and no more input, exit
+                this.exit(this.exitCode);
+            }
         }
     }
 
-    queueCommand(str) {
-        // TODO: parse parameters
-        let params = str.split(' ').filter(e => e.length !== 0);
-
-        // FIXME: move to execution
-        // // resolve variables
-        // // TODO: merge with parsing for in-line usage
-        // for (let i = params.length - 1; i >= 0; --i) {
-        //     if (params[i][0] === '$') {
-        //         let val = this.variables.get(params[i].substr(1));
-        //         params[i] = val || '';
-        //     }
-        // }
-
-        // FIXME: move to execution
-        // // process variable assignments
-        // while (params.length > 0) {
-        //     let idx = params[0].indexOf('=');
-        //     if (idx === -1)
-        //         break;
-
-        //     let name = params[0].substr(0, idx);
-        //     let value = params[0].substr(idx + 1);
-        //     this.variables.set(name, value);
-        //     params.shift();
-        // }
-
-        if (params.length === 0)
+    queueJob(str) {
+        if (!str.trim())
             return;
 
-        let programs = [[]];
-
-        for (let i = 0; i < params.length; ++i) {
-            if (params[i] === '|') {
-                programs.push([]);
-                continue;
-            }
-
-            programs[programs.length - 1].push(params[i]);
-        }
+        // TODO: parse parameters (e.g. quotes)
+        let programs = str.split(/\|/).map(e => e.trim().split(/\s+/));
 
         // detect pipe syntax errors
         if (programs.some(e => e.length === 0)) {
             this.stderr.writeText('sh: invalid pipe');
-            this.setPrompt(1);
+            this.setReturnCode(1);
             return;
         }
 
-        this.commands.push(programs);
+        this.jobs.push(programs);
     }
 
-    executeNext() {
-        if (this.commandRunning || this.commands.length === 0)
+    nextJob() {
+        if (this.jobRunning || this.jobs.length === 0)
             return;
 
-        this.commandRunning = true;
-
-        let programs = this.commands.shift();
+        let programs = this.jobs.shift();
         let processes = programs.map(e => this.createProcess(e[0]));
 
         // detect non-existent processes
         if (processes.some(e => !e)) {
-            this.setPrompt(127);
+            this.setReturnCode(127);
             return;
         }
 
         let args = programs.map(e => e.slice(1));
 
+        this.jobRunning = true;
+
         for (let i = 0; i < processes.length; ++i) {
-            processes[i].siblings = processes;
+            processes[i].job = processes;
             if (i > 0)
                 processes[i].stdin = processes[i - 1];
             if (i < processes.length - 1)
@@ -633,14 +635,22 @@ class Shell extends Program {
         }
 
         // execute in reverse order so that input can be received
+        // TODO: reverse order might be bad. Solutions?
         for (let i = processes.length - 1; i >= 0; --i) {
-            processes[i].execute(args[i]);
+            processes[i].execute(args[i].map(e => {
+                // resolve environment variables
+                if (e[0] === '$')
+                    return this.variables.get(e.substr(1));
+
+                return e;
+            }));
         }
     }
 
-    setPrompt(code) {
+    setReturnCode(code) {
         this.variables.set('?', code);
         this.prompt = code ? span('$ ', 'error') : '$ ';
+        this.exitCode = code;
     }
 
     createProcess(cmd) {
@@ -649,14 +659,21 @@ class Shell extends Program {
                 return new Printer(this, this.history.join('\n'));
 
             case 'read':
-                return new Monitor(this, (proc, str) => {
-                    this.variables.set(proc.args[0], str);
+                return new Monitor(this, (proc, content) => {
+                    this.variables.set(proc.args[0], content.str());
                     proc.exit();
                 });
 
             case 'echo':
                 return new Caller(this, (proc) => {
                     proc.stdout.writeText(proc.args.join(' '));
+                });
+
+            case 'set':
+                return new Caller(this, (proc) => {
+                    let val = proc.args.slice(1).join(' ');
+                    this.variables.set(proc.args[0], val);
+                    proc.exit();
                 });
 
             case 'exit':
@@ -671,6 +688,8 @@ class Shell extends Program {
                 });
         }
 
+        // TODO: aliases
+
         if (!bin[cmd]) {
             this.stderr.writeText('sh: command not found: ' + cmd);
             return;
@@ -678,6 +697,8 @@ class Shell extends Program {
 
         return new bin[cmd](this);
     }
+
+    // TODO: source function
 }
 
 class Interpreter extends Program {
@@ -689,8 +710,7 @@ class Interpreter extends Program {
 
     onInput(content) {
         try {
-            for (let item of content.items())
-                this.stdout.write(new ObjectOutput(eval(item.str())));
+            this.stdout.write(new ObjectOutput(eval(content.str())));
         } catch (e) {
             this.stderr.writeText(e.toString());
         }
@@ -840,6 +860,34 @@ class Tail extends Program {
     }
 }
 
+class Grep extends Program {
+    onExecute(regex) {
+        if (regex === undefined) {
+            this.stderr.writeText('grep: missing pattern');
+            return 2;
+        }
+
+        this.inputEnabled = true;
+        this.pattern = new RegExp(regex);
+        this.matched = false;
+    }
+
+    onInput(content) {
+        let source = content.str().split(/\n/);
+        let matches = source.filter(e => this.pattern.test(e));
+
+        if (matches.length === 0)
+            return;
+
+        this.stdout.writeText(matches.join('\n'));
+        this.matched = true;
+    }
+
+    onEOF() {
+        this.exit(this.matched ? 0 : 1);
+    }
+}
+
 class Sleep extends Program {
     onExecute(time) {
         let t = Number.parseFloat(time);
@@ -880,15 +928,12 @@ const bin = {
     'curl': Curl,
     'head': Head,
     'tail': Tail,
+    'grep': Grep,
     'sleep': Sleep,
     'clear': Clear
 };
 
 let term = null;
-let termErr = null;
 
 term = new Term();
-termErr = new TermError();
-
-termErr.execute();
 term.execute([Shell]);
