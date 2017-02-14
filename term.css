@@ -25,6 +25,10 @@ body {
     background-color: rgb(47, 47, 47);
 }
 
+#output {
+    display: block;
+}
+
 #cursor {
     animation: 1s cursor linear infinite;
 }

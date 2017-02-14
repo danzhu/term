@@ -264,6 +264,10 @@ class Program {
         // ignore
     }
 
+    clearHistory() {
+        // ignore
+    }
+
     clearInput() {
         // ignore
     }
@@ -280,6 +284,10 @@ class Program {
         // ignore
     }
 
+    onInput(content) {
+        // ignore
+    }
+
     onEOF() {
         if (this.inputEnabled)
             this.exit();
@@ -289,10 +297,6 @@ class Program {
         if (this.parent)
             this.parent.interrupt();
         this.exit(130);
-    }
-
-    onInput(msg) {
-        // ignore
     }
 
     onReturn(prog, code) {
@@ -322,6 +326,7 @@ class Term extends Program {
         this.inputElement = document.getElementById('input');
         this.outputElement = document.getElementById('output');
 
+        // FIXME: this requires delicate sequencing - better ways?
         this.stderr.execute();
 
         document.addEventListener('keypress', e => {
@@ -340,8 +345,6 @@ class Term extends Program {
 
                 let content = this.inputContent;
 
-                prog.writeText(this.inputContent);
-
                 // remove duplicate history and add new entry
                 if (!prog.password && content.trim()) {
                     let idx = prog.history.indexOf(content);
@@ -349,6 +352,8 @@ class Term extends Program {
                         prog.history.splice(idx, 1);
                     prog.history.push(content);
                 }
+
+                prog.writeText(this.inputContent);
 
                 this.clearInput();
             } else {
@@ -369,30 +374,19 @@ class Term extends Program {
         document.addEventListener('keydown', e => {
             let prog = this.stdout;
 
-            if (!prog)
-                return;
-
-            // ctrl + c always works, even when input is disabled
-            if (e.ctrlKey && e.key == 'c') {
-                this.clearInput();
-
-                // interrupt every process in job
-                for (let p of prog.job)
-                    p.interrupt();
-
-                this.updateInput();
-                e.preventDefault();
-                return;
-            }
-
-            if (!prog.inputEnabled)
-                return;
-
             if (e.ctrlKey) {
                 switch (e.key) {
+                    case 'c':
+                        this.clearInput();
+
+                        // interrupt every process in job
+                        for (let p of prog.job)
+                            p.interrupt();
+                        break;
+
                     case 'd':
-                        // prevent EOF when not on empty line
-                        if (this.inputContent !== '')
+                        // prevent EOF when input disabled or not on empty line
+                        if (!prog.inputEnabled || this.inputContent !== '')
                             break;
 
                         // echo termination input if available
@@ -401,12 +395,26 @@ class Term extends Program {
 
                         prog.eof();
                         break;
+
+                    case 'l':
+                        this.clearHistory();
+                        break;
+
+                    case 'u':
+                        if (!prog.inputEnabled)
+                            break;
+
+                        this.clearInput();
+                        break;
                 }
 
                 this.updateInput();
                 e.preventDefault();
                 return;
             }
+
+            if (!prog.inputEnabled)
+                return;
 
             switch (e.key) {
                 case 'ArrowLeft':
@@ -486,10 +494,6 @@ class Term extends Program {
         this.updateInput();
     }
 
-    onEOF() {
-        // ignore
-    }
-
     onInput(content) {
         let output = document.createElement('div');
         output.innerHTML = content.print();
@@ -500,6 +504,16 @@ class Term extends Program {
             this.termElement.scrollTop = this.termElement.scrollHeight;
     }
 
+    onEOF() {
+        // ignore, since processes send EOF to stdout when exiting
+    }
+
+    onReturn(prog, code) {
+        this.writeText('[returned ' + code.toString() + ']');
+        this.inputEnabled = false;
+        // TODO: maybe restart shell? Or close window?
+    }
+
     writeHistory(prompt, input) {
         this.writeRaw(
             '<pre>' +
@@ -507,6 +521,11 @@ class Term extends Program {
             span(escapeHTML(input), 'input') +
             '</pre>'
         );
+    }
+
+    clearHistory() {
+        while (this.outputElement.lastChild)
+            this.outputElement.removeChild(this.outputElement.lastChild);
     }
 
     clearInput() {
@@ -559,8 +578,9 @@ class TermError extends Program {
     }
 
     onInput(content) {
-        // FIXME: right now it's pre inside span - should be other way around
-        this.stdout.writeRaw(span(content.print(), 'error'));
+        this.stdout.writeRaw('<pre>' +
+            span(escapeHTML(content.str()), 'error') +
+            '</pre>');
     }
 }
 
@@ -612,12 +632,16 @@ class Shell extends Program {
     constructor(parent) {
         super(parent);
         this.inputEnabled = true;
+        this.exitInput = 'exit';
+        this.setReturnCode(0);
+
+        this.historyFile = '.history';
+        this.historyLength = 100;
 
         this.jobRunning = false;
         this.jobs = [];
-
-        this.exitInput = 'exit';
-        this.setReturnCode(0);
+        // set to undefined to prevent writing history before loading
+        this.historyPromise = undefined;
     }
 
     onExecute(script) {
@@ -633,10 +657,39 @@ class Shell extends Program {
         if (this.stdin.tty) { // interactive
             this.stdout.writeText('Term v0.2');
             // TODO: source .shrc
+
+            if (this.historyFile) {
+                // load history
+                Async.read(this.historyFile).then(content => {
+                    this.historyPromise = null;
+
+                    if (!content)
+                        return;
+
+                    this.history = content.split(/\n/).concat(this.history);
+                    this.historyIndex = this.history.length;
+                }, error => {
+                    // ignore error
+                    this.historyPromise = null;
+                    console.log('failed to read history file');
+                });
+            }
         }
     }
 
     onInput(content) {
+        // TODO: history shortcuts
+
+        if (this.historyPromise === null) {
+            let hist = this.history.slice(this.history.length - this.historyLength);
+            this.historyPromise = Async.write(this.historyFile, hist.join('\n'));
+            this.historyPromise.then(() => {
+                this.historyPromise = null;
+            }, error => {
+                console.log('failed to write history file');
+            });
+        }
+
         for (let line of content.str().split(/\n|;/)) {
             this.queueJob(line);
         }
@@ -887,7 +940,9 @@ class Curl extends Program {
             return 1;
         }
 
-        Async.request('GET', url).then(content => {
+        this.promise = Async.request('GET', url);
+        this.promise.then(content => {
+            // TODO: this can probably be removed
             if (this.state !== RUNNING)
                 return;
 
@@ -898,11 +953,10 @@ class Curl extends Program {
         });
     }
 
-    // TODO: abort when interrupted
-    // onInterrupt() {
-    //     this.req.abort();
-    //     super.onInterrupt();
-    // }
+    onInterrupt() {
+        this.promise.abort();
+        super.onInterrupt();
+    }
 }
 
 class Head extends Program {
@@ -1011,10 +1065,7 @@ class Sleep extends Program {
 
 class Clear extends Program {
     onExecute() {
-        const output = document.getElementById('output');
-        while (output.lastChild)
-            output.removeChild(output.lastChild);
-
+        this.stdout.clearHistory();
         return 0;
     }
 }
