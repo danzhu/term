@@ -24,7 +24,9 @@ class Output {
     }
 
     print() {
-        return this.str();
+        let pre = document.createElement('pre');
+        pre.textContent = this.content || '\n';
+        return pre;
     }
 
     items() {
@@ -33,16 +35,18 @@ class Output {
 }
 
 class RawOutput extends Output {
+    print() {
+        let pre = document.createElement('pre');
+        pre.innerHTML = this.str();
+        return pre;
+    }
+
     items() {
         return this.content.split('\n').map(e => new RawOutput(e));
     }
 }
 
 class TextOutput extends Output {
-    print() {
-        return '<pre>' + escapeHTML(this.content || '\n') + '</pre>';
-    }
-
     items() {
         return this.content.split('\n').map(e => new TextOutput(e));
     }
@@ -59,11 +63,12 @@ class ArrayOutput extends Output {
     }
 
     print() {
-        return (this.format ?
-            '<div class="' + this.format + '">' :
-            '<div>') +
-            this.content.map(e => e.print()).join('') +
-            '</div>';
+        let div = document.createElement('div');
+        if (this.format)
+            div.classList.add(this.format);
+        for (let item of this.content)
+            div.appendChild(item.print());
+        return div;
     }
 
     items() {
@@ -77,12 +82,6 @@ class ObjectOutput extends Output {
     }
 
     // TODO: formatted print
-}
-
-class FileOutput extends Output {
-    print() {
-        return '<pre class="item">' + this.content + '</pre>';
-    }
 }
 
 const Async = {
@@ -137,12 +136,18 @@ const Async = {
     },
 
     append(path, content) {
-        let prev = localStorage.getItem(path);
-        if (prev === null)
-            prev = '';
-        else
-            prev += '\n';
+        let prev = localStorage.getItem(path) || '';
         localStorage.setItem(path, prev + content);
+        return Promise.resolve();
+    },
+
+    move(path, target) {
+        let content = localStorage.getItem(path);
+        if (content === null)
+            return Promise.reject(path + ': no such file');
+
+        localStorage.setItem(target, content);
+        localStorage.removeItem(path);
         return Promise.resolve();
     },
 
@@ -150,6 +155,8 @@ const Async = {
         localStorage.removeItem(path);
         return Promise.resolve();
     }
+
+    // TODO: async execute
 }
 
 class Program {
@@ -490,14 +497,12 @@ class Term extends Program {
 
     onExecute(shell) {
         this.sh = new shell(this);
-        this.sh.execute(['-']);
+        this.sh.execute();
         this.updateInput();
     }
 
     onInput(content) {
-        let output = document.createElement('div');
-        output.innerHTML = content.print();
-        this.outputElement.appendChild(output.firstChild);
+        this.outputElement.appendChild(content.print());
 
         // FIXME: always scroll if at bottom
         if (this.scrollOnOutput)
@@ -516,10 +521,8 @@ class Term extends Program {
 
     writeHistory(prompt, input) {
         this.writeRaw(
-            '<pre>' +
             span(prompt, 'prompt') +
-            span(escapeHTML(input), 'input') +
-            '</pre>'
+            span(escapeHTML(input), 'input')
         );
     }
 
@@ -578,9 +581,7 @@ class TermError extends Program {
     }
 
     onInput(content) {
-        this.stdout.writeRaw('<pre>' +
-            span(escapeHTML(content.str()), 'error') +
-            '</pre>');
+        this.stdout.writeRaw(span(escapeHTML(content.str()), 'error'));
     }
 }
 
@@ -631,49 +632,50 @@ class Caller extends Program {
 class Shell extends Program {
     constructor(parent) {
         super(parent);
-        this.inputEnabled = true;
         this.exitInput = 'exit';
         this.setReturnCode(0);
-
-        this.historyFile = '.history';
-        this.historyLength = 100;
 
         this.jobRunning = false;
         this.jobs = [];
         // set to undefined to prevent writing history before loading
         this.historyPromise = undefined;
+        this.loaded = false;
+        this.script = null;
     }
 
     onExecute(script) {
         if (script) {
-            if (script !== '-') {
-                // TODO: run script
-                return;
-            }
+            this.script = script;
+            Async.read(script).then(content => {
+                // execute script
 
-            // TODO: source .login
-        }
+                this.inputEnabled = true;
+                this.executeCommand(content);
+            }, error => {
+                // script not found
 
-        if (this.stdin.tty) { // interactive
-            this.stdout.writeText('Term v0.2');
-            // TODO: source .shrc
+                this.stderr.writeText('sh: ' + error);
+                this.exit(127);
+            });
+        } else if (this.stdin.tty) { // interactive
+            Async.read('.config').then(content => {
+                // config file found, execute it
 
-            if (this.historyFile) {
-                // load history
-                Async.read(this.historyFile).then(content => {
-                    this.historyPromise = null;
+                this.inputEnabled = true;
+                this.executeCommand(content);
+            }, error => {
+                // no config file, show first-time usage help
+                // TODO: actually show help messages
 
-                    if (!content)
-                        return;
-
-                    this.history = content.split(/\n/).concat(this.history);
-                    this.historyIndex = this.history.length;
-                }, error => {
-                    // ignore error
-                    this.historyPromise = null;
-                    console.log('failed to read history file');
-                });
-            }
+                this.stdout.writeText('Welcome to Term v0.3');
+                this.inputEnabled = true;
+                this.loaded = true;
+                this.stdin.updateInput();
+            });
+        } else {
+            // executing commands from stdin
+            this.inputEnabled = true;
+            this.loaded = true;
         }
     }
 
@@ -681,8 +683,10 @@ class Shell extends Program {
         // TODO: history shortcuts
 
         if (this.historyPromise === null) {
-            let hist = this.history.slice(this.history.length - this.historyLength);
-            this.historyPromise = Async.write(this.historyFile, hist.join('\n'));
+            let hist = this.history.slice(this.history.length -
+                Number.parseInt(this.variables.get('HIST_SIZE')) || 100);
+            this.historyPromise = Async.write(this.variables.get('HIST_FILE'),
+                hist.join('\n'));
             this.historyPromise.then(() => {
                 this.historyPromise = null;
             }, error => {
@@ -690,17 +694,12 @@ class Shell extends Program {
             });
         }
 
-        for (let line of content.str().split(/\n|;/)) {
-            this.queueJob(line);
-        }
-
-        this.nextJob();
+        this.executeCommand(content.str());
     }
 
     onEOF() {
-        // ignore when there's still job running
-        if (!this.jobRunning)
-            this.exit(this.exitCode);
+        // exit with exit code of last job
+        this.exit(this.exitCode);
     }
 
     onInterrupt() {
@@ -721,14 +720,46 @@ class Shell extends Program {
             if (this.jobs.length !== 0) {
                 // there are more jobs, do next one
                 this.nextJob();
-            } else if (this.stdin.state !== TERMINATED) {
-                // no more jobs right now, update input
+            } else if (this.stdin.state !== TERMINATED && !this.script) {
+                // no more jobs right now and not running script, update input
                 this.stdin.updateInput();
+
+                if (this.loaded)
+                    return;
+
+                this.loaded = true;
+
+                // initialize history
+                let histFile = this.variables.get('HIST_FILE');
+                if (histFile) {
+                    // load history
+                    Async.read(histFile).then(content => {
+                        this.historyPromise = null;
+
+                        if (!content)
+                            return;
+
+                        this.history = content.split(/\n/).concat(this.history);
+                        this.historyIndex = this.history.length;
+                    }, error => {
+                        // ignore error
+                        this.historyPromise = null;
+                        console.log('failed to read history file');
+                    });
+                }
             } else {
                 // last job ended and no more input, exit
                 this.exit(this.exitCode);
             }
         }
+    }
+
+    executeCommand(content) {
+        for (let line of content.split(/\n|;/)) {
+            this.queueJob(line);
+        }
+
+        this.nextJob();
     }
 
     queueJob(str) {
@@ -784,6 +815,8 @@ class Shell extends Program {
                 return e;
             }));
         }
+
+        this.stdin.updateInput();
     }
 
     setReturnCode(code) {
@@ -885,7 +918,8 @@ class Tee extends Program {
         this.content = [];
         this.file = file;
         this.inputEnabled = true;
-        this.promise = null;
+        this.promise = Async.write(file, '');
+        this.promise.then(() => this.promise = null);
     }
 
     onInput(content) {
@@ -900,8 +934,10 @@ class Tee extends Program {
             this.content.length === 0)
             return;
 
-        this.promise = Async.append(this.file, this.content[0]);
-        this.content.shift();
+        let content = this.content.join('\n') + '\n';
+        this.content = [];
+
+        this.promise = Async.append(this.file, content);
         this.promise.then(() => {
             this.promise = null;
             this.appendNext();
@@ -916,6 +952,27 @@ class List extends Program {
         // find a way to preserve overall formatting
         this.stdout.write(new ArrayOutput(list, 'multicolumn'));
         return 0;
+    }
+}
+
+class Move extends Program {
+    onExecute(path, target) {
+        if (!path) {
+            this.stderr.writeText('mv: missing file operand');
+            return 1;
+        }
+
+        if (!target) {
+            this.stderr.writeText('mv: missing destination file operand');
+            return 1;
+        }
+
+        Async.move(path, target).then(() => {
+            this.exit();
+        }, error => {
+            this.stderr.writeText('mv: ' + error);
+            this.exit(1);
+        });
     }
 }
 
@@ -949,6 +1006,7 @@ class Curl extends Program {
             this.stdout.writeText(content);
             this.exit();
         }, error => {
+            // TODO: error message
             this.exit(1);
         });
     }
@@ -1076,6 +1134,7 @@ const bin = {
     'cat': Cat,
     'tee': Tee,
     'ls': List,
+    'mv': Move,
     'rm': Remove,
     'curl': Curl,
     'head': Head,
