@@ -40,7 +40,7 @@ class RawOutput extends Output {
 
 class TextOutput extends Output {
     print() {
-        return escapeHTML(this.content || '\n');
+        return '<pre>' + escapeHTML(this.content || '\n') + '</pre>';
     }
 
     items() {
@@ -49,13 +49,21 @@ class TextOutput extends Output {
 }
 
 class ArrayOutput extends Output {
+    constructor(content, format = null) {
+        super(content);
+        this.format = format;
+    }
+
     str() {
         return this.content.map(e => e.str()).join('\n');
     }
 
     print() {
-        // TODO: formatted print
-        return this.content.map(e => e.print()).join('\n');
+        return (this.format ?
+            '<div class="' + this.format + '">' :
+            '<div>') +
+            this.content.map(e => e.print()).join('') +
+            '</div>';
     }
 
     items() {
@@ -71,7 +79,78 @@ class ObjectOutput extends Output {
     // TODO: formatted print
 }
 
-// TODO: filesystem and net API
+class FileOutput extends Output {
+    print() {
+        return '<pre class="item">' + this.content + '</pre>';
+    }
+}
+
+const Async = {
+    timeout(time) {
+        let handle;
+        let promise = new Promise((resolve, reject) => {
+            handle = setTimeout(() => {
+                resolve();
+            }, time);
+        });
+
+        promise.abort = () => clearTimeout(handle);
+        return promise;
+    },
+
+    request(method, url, timeout = 0) {
+        let req;
+        let promise = new Promise((resolve, reject) => {
+            req = new XMLHttpRequest();
+            req.open(method, url, true);
+            if (timeout > 0)
+                req.timeout = timeout;
+            req.onreadystatechange = () => {
+                if (req.readyState !== 4)
+                    return;
+
+                if (req.status != 200) {
+                    reject(req.status);
+                    return;
+                }
+
+                resolve(req.responseText);
+            };
+            req.send();
+        });
+
+        promise.abort = () => req.abort();
+        return promise;
+    },
+
+    read(path) {
+        let content = localStorage.getItem(path);
+        if (content !== null)
+            return Promise.resolve(content);
+        else
+            return Promise.reject(path + ': no such file');
+    },
+
+    write(path, content) {
+        localStorage.setItem(path, content);
+        return Promise.resolve();
+    },
+
+    append(path, content) {
+        let prev = localStorage.getItem(path);
+        if (prev === null)
+            prev = '';
+        else
+            prev += '\n';
+        localStorage.setItem(path, prev + content);
+        return Promise.resolve();
+    },
+
+    remove(path) {
+        localStorage.removeItem(path);
+        return Promise.resolve();
+    }
+}
 
 class Program {
     constructor(parent = null) {
@@ -89,6 +168,7 @@ class Program {
 
         this.state = READY;
         this.tty = false;
+        this.inputEnded = false;
 
         if (parent) {
             this.stdin = parent.stdin;
@@ -106,29 +186,31 @@ class Program {
         this.state = RUNNING;
         this.args = args;
 
-        if (this.stdin.tty)
-            this.stdin.stdout = this;
+        this.stdin.stdout = this;
 
         if (this.parent)
             this.parent.children.add(this);
 
         let res = this.onExecute.apply(this, args);
 
+        if (this.stdin.state === TERMINATED)
+            this.eof();
+
         if (typeof res === 'number')
             this.exit(res);
     }
 
     eof() {
-        if (this.state !== RUNNING)
+        if (this.state !== RUNNING || this.inputEnded)
             return;
+
+        this.inputEnded = true;
         this.onEOF();
     }
 
     interrupt() {
         if (this.state !== RUNNING)
             return;
-
-        // send signal to all processes in job
         this.onInterrupt();
     }
 
@@ -150,12 +232,13 @@ class Program {
         //     return;
         // }
 
-        if (this.jobReturned()) {
-            // return control to first process in pipeline
-            let first = this.parent.job[0];
-            first.stdin.stdout = first;
-            first.stdin.updateInput();
-        }
+        // restore control to parent process
+        let input = this.parent.stdin;
+        input.stdout = this.parent;
+        input.updateInput();
+
+        if (input.state === TERMINATED)
+            this.eof();
 
         // update and notify parent process
         this.parent.children.delete(this);
@@ -408,9 +491,9 @@ class Term extends Program {
     }
 
     onInput(content) {
-        let div = document.createElement('pre');
-        div.innerHTML = content.print();
-        this.outputElement.appendChild(div);
+        let output = document.createElement('div');
+        output.innerHTML = content.print();
+        this.outputElement.appendChild(output.firstChild);
 
         // FIXME: always scroll if at bottom
         if (this.scrollOnOutput)
@@ -419,8 +502,10 @@ class Term extends Program {
 
     writeHistory(prompt, input) {
         this.writeRaw(
+            '<pre>' +
             span(prompt, 'prompt') +
-            span(escapeHTML(input), 'input')
+            span(escapeHTML(input), 'input') +
+            '</pre>'
         );
     }
 
@@ -474,6 +559,7 @@ class TermError extends Program {
     }
 
     onInput(content) {
+        // FIXME: right now it's pre inside span - should be other way around
         this.stdout.writeRaw(span(content.print(), 'error'));
     }
 }
@@ -482,13 +568,13 @@ class Monitor extends Program {
     constructor(parent, callback, eof = null) {
         super(parent);
         this.callback = callback;
-        this.eof = eof;
+        this.ending = eof;
         this.inputEnabled = true;
     }
 
     onEOF() {
-        if (this.eof)
-            this.eof(this);
+        if (this.ending)
+            this.ending(this);
         else
             super.onEOF();
     }
@@ -718,20 +804,22 @@ class Interpreter extends Program {
 }
 
 class Cat extends Program {
-    onExecute(file) {
-        if (!file) {
+    onExecute() {
+        let files = this.args;
+
+        if (files.length === 0) {
             this.inputEnabled = true;
             return;
         }
 
-        let content = localStorage.getItem(file);
-        if (content === null) {
-            this.stderr.writeText('cat: ' + file + ': no such file');
-            return 1;
-        }
-
-        this.stdout.writeText(content);
-        return 0;
+        Promise.all(files.map(Async.read)).then(contents => {
+            for (let content of contents)
+                this.stdout.writeText(content);
+            this.exit();
+        }, error => {
+            this.stderr.writeText('cat: ' + error);
+            this.exit(1);
+        });
     }
 
     onInput(content) {
@@ -744,32 +832,51 @@ class Tee extends Program {
         this.content = [];
         this.file = file;
         this.inputEnabled = true;
+        this.promise = null;
     }
 
     onInput(content) {
         this.content.push(content.str());
         this.stdout.write(content);
-        localStorage.setItem(this.file, this.content.join('\n'));
+        this.appendNext();
+    }
+
+    appendNext() {
+        if (this.state !== RUNNING ||
+            this.promise ||
+            this.content.length === 0)
+            return;
+
+        this.promise = Async.append(this.file, this.content[0]);
+        this.content.shift();
+        this.promise.then(() => {
+            this.promise = null;
+            this.appendNext();
+        });
     }
 }
 
 class List extends Program {
     onExecute() {
         let list = Object.keys(localStorage).map(e => new TextOutput(e));
-        this.stdout.write(new ArrayOutput(list));
+        // FIXME: format will be lost when processed,
+        // find a way to preserve overall formatting
+        this.stdout.write(new ArrayOutput(list, 'multicolumn'));
         return 0;
     }
 }
 
 class Remove extends Program {
-    onExecute(file) {
-        if (!file) {
+    onExecute() {
+        let files = this.args;
+        if (files.length === 0) {
             this.stderr.writeText('rm: missing operand');
             return 1;
         }
 
-        localStorage.removeItem(file);
-        return 0;
+        Promise.all(files.map(Async.remove)).then(() => {
+            this.exit();
+        });
     }
 }
 
@@ -780,26 +887,22 @@ class Curl extends Program {
             return 1;
         }
 
-        this.req = new XMLHttpRequest();
-        this.req.open('GET', url, true);
-        this.req.onreadystatechange = () => {
-            if (this.req.readyState !== 4)
+        Async.request('GET', url).then(content => {
+            if (this.state !== RUNNING)
                 return;
 
-            if (this.req.status != 200) {
-                this.exit(1);
-                return;
-            }
-            this.stdout.writeText(this.req.responseText);
+            this.stdout.writeText(content);
             this.exit();
-        };
-        this.req.send();
+        }, error => {
+            this.exit(1);
+        });
     }
 
-    onInterrupt() {
-        this.req.abort();
-        super.onInterrupt();
-    }
+    // TODO: abort when interrupted
+    // onInterrupt() {
+    //     this.req.abort();
+    //     super.onInterrupt();
+    // }
 }
 
 class Head extends Program {
@@ -873,13 +976,12 @@ class Grep extends Program {
     }
 
     onInput(content) {
-        let source = content.str().split(/\n/);
-        let matches = source.filter(e => this.pattern.test(e));
+        let matches = content.items().filter(e => this.pattern.test(e.str()));
 
         if (matches.length === 0)
             return;
 
-        this.stdout.writeText(matches.join('\n'));
+        this.stdout.write(new ArrayOutput(matches));
         this.matched = true;
     }
 
@@ -897,13 +999,12 @@ class Sleep extends Program {
             return 1;
         }
 
-        this.handle = setTimeout(() => {
-            this.exit();
-        }, t * 1000);
+        this.promise = Async.timeout(time * 1000);
+        this.promise.then(() => this.exit());
     }
 
     onInterrupt() {
-        clearTimeout(this.handle);
+        this.promise.abort();
         super.onInterrupt();
     }
 }

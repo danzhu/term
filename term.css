@@ -22,7 +22,7 @@ body {
 }
 
 #term pre:hover {
-    background-color: rgb(31, 31, 31);
+    background-color: rgb(47, 47, 47);
 }
 
 #cursor {
@@ -39,6 +39,17 @@ body {
 
 .error {
     color: rgb(255, 127, 127);
+}
+
+.multicolumn {
+    columns: 10em;
+}
+
+.multicolumn > * {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-wrap: normal !important;
+    white-space: nowrap !important;
 }
 
 @keyframes cursor {
