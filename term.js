@@ -141,6 +141,10 @@ const Async = {
         return Promise.resolve();
     },
 
+    list(path) {
+        return Promise.resolve(Object.keys(localStorage));
+    },
+
     move(path, target) {
         let content = localStorage.getItem(path);
         if (content === null)
@@ -947,11 +951,17 @@ class Tee extends Program {
 
 class List extends Program {
     onExecute() {
-        let list = Object.keys(localStorage).map(e => new TextOutput(e));
-        // FIXME: format will be lost when processed,
-        // find a way to preserve overall formatting
-        this.stdout.write(new ArrayOutput(list, 'multicolumn'));
-        return 0;
+        Async.list('.').then(files => {
+            let list = files.map(e => new TextOutput(e));
+
+            // FIXME: format will be lost when processed,
+            // find a way to preserve overall formatting
+            this.stdout.write(new ArrayOutput(list, 'multicolumn'));
+            this.exit();
+        }, error => {
+            this.stderr.writeText('ls: ' + error);
+            this.exit(1);
+        });
     }
 }
 
