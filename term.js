@@ -14,6 +14,10 @@ const READY = Symbol('ready');
 const RUNNING = Symbol('running');
 const TERMINATED = Symbol('terminated');
 
+const ID = /[A-Za-z0-9_]/;
+const SYM = /[^A-Za-z0-9_ \t]/;
+const WS = /[ \t]/;
+
 class Output {
     constructor(content) {
         this.content = content;
@@ -338,6 +342,7 @@ class Term extends Program {
         this.promptElement = document.getElementById('prompt');
         this.inputElement = document.getElementById('input');
         this.outputElement = document.getElementById('output');
+        this.uiElement = document.getElementById('ui');
 
         // FIXME: this requires delicate sequencing - better ways?
         this.stderr.execute();
@@ -554,6 +559,12 @@ class Term extends Program {
     updateInput() {
         let prog = this.stdout;
 
+        if (prog.ui !== this.uiElement.firstChild) {
+            while (this.uiElement.lastChild)
+                this.uiElement.removeChild(this.uiElement.lastChild);
+            if (prog.ui)
+                this.uiElement.appendChild(prog.ui);
+        }
         this.promptElement.innerHTML = prog ? prog.prompt : '';
 
         let content = this.inputContent;
@@ -568,9 +579,10 @@ class Term extends Program {
             return;
         }
 
-        let cursor = '<span id="cursor">' +
-            escapeHTML(content.substr(this.inputCursor, 1) || ' ') +
-            '</span>';
+        let cursor = span(
+            escapeHTML(content.substr(this.inputCursor, 1) || ' '),
+            'cursor'
+        );
 
         this.inputElement.innerHTML =
             escapeHTML(content.substr(0, this.inputCursor)) +
@@ -678,7 +690,7 @@ class Shell extends Program {
                 // no config file, show first-time usage help
                 // TODO: actually show help messages
 
-                this.stdout.writeText('Welcome to Term v0.3');
+                this.stdout.writeText('Welcome to Term v0.4');
                 this.inputEnabled = true;
                 this.loaded = true;
                 this.stdin.updateInput();
@@ -890,17 +902,392 @@ class Editor extends Program {
     constructor(parent) {
         super(parent);
         this.rawInput = true;
+        this.ui = document.createElement('div');
+        this.buffer = [];
+        this.mode = 'n';
+        this.ending = false;
+        this.promise = null;
+    }
+
+    get cursorLine() {
+        return this._cursorLine;
+    }
+
+    set cursorLine(value) {
+        if (value < 0)
+            this._cursorLine = 0;
+        else if (value >= this.buffer.length)
+            this._cursorLine = this.buffer.length;
+        else
+            this._cursorLine = value;
+    }
+
+    get cursorColumn() {
+        return this._cursorColumn;
+    }
+
+    set cursorColumn(value) {
+        if (value < 0)
+            this._cursorColumn = 0;
+        else if (value >= this.buffer[this._cursorLine].length)
+            this._cursorColumn =
+                this.buffer[this._cursorLine].length -
+                (this.mode === 'i' ? 0 : 1);
+        else
+            this._cursorColumn = value;
+    }
+
+    get virtualColumn() {
+        return this._virtualColumn;
+    }
+
+    set virtualColumn(value) {
+        if (value < 0)
+            this._virtualColumn = this._cursorColumn = 0;
+        else if (value >= this.buffer[this._cursorLine].length)
+            this._virtualColumn = this._cursorColumn =
+                this.buffer[this._cursorLine].length -
+                (this.mode === 'i' ? 0 : 1);
+        else
+            this._virtualColumn = this._cursorColumn = value;
     }
 
     onExecute(file) {
         this.file = file;
+
+        Async.read(file).then((content) => {
+            this.buffer = content.split(/\n/);
+
+            for (let ln = 0; ln < this.buffer.length; ++ln) {
+                let pre = this.createLine(this.buffer[ln]);
+                this.ui.appendChild(pre);
+            }
+
+            this.cursorLine = 0;
+            this.virtualColumn = 0;
+
+            this.updateLine(0);
+            this.updateLineNumber(0);
+        });
     }
 
     onInput(event) {
-        if (event.key === 'q') {
+        if (this.ending)
+            return;
+
+        let line = this.buffer[this.cursorLine];
+
+        if (this.mode === 'i') {
+            switch (event.key) {
+                case 'Enter':
+                    let next = line.substr(this.cursorColumn);
+                    this.buffer[this.cursorLine] =
+                        line.substr(0, this.cursorColumn);
+                    this.buffer.splice(this.cursorLine + 1, 0, next);
+                    this.ui.insertBefore(
+                        this.createLine(next),
+                        this.ui.children[this.cursorLine + 1]
+                    );
+
+                    ++this.cursorLine;
+                    this.virtualColumn = 0;
+                    this.updateLine(this.cursorLine - 1);
+                    this.updateLine(this.cursorLine);
+                    this.updateLineNumber(this.cursorLine);
+                    break;
+
+                case 'Escape':
+                    this.mode = 'n';
+                    if (this.cursorColumn > 0) {
+                        --this.cursorColumn;
+                        this.updateLine(this.cursorLine);
+                    }
+                    break;
+
+                case 'Backspace':
+                    if (this.cursorColumn > 0) { // delete char
+                        this.buffer[this.cursorLine] =
+                            line.substr(0, this.cursorColumn - 1) +
+                            line.substr(this.cursorColumn);
+                        --this.cursorColumn;
+
+                        this.updateLine(this.cursorLine);
+                    } else if (this.cursorLine > 0) { // delete (join) line
+                        let col = this.buffer[this.cursorLine - 1].length;
+
+                        // remove line
+                        this.buffer[this.cursorLine - 1] +=
+                            this.buffer[this.cursorLine];
+                        this.ui.removeChild(this.ui.children[this.cursorLine]);
+                        this.buffer.splice(this.cursorLine, 1);
+
+                        --this.cursorLine;
+                        this.virtualColumn = col;
+
+                        this.updateLine(this.cursorLine);
+                        this.updateLineNumber(this.cursorLine + 1);
+                    }
+                    break;
+
+                default:
+                    if (event.key.length !== 1)
+                        return;
+
+                    this.buffer[this.cursorLine] =
+                        line.substr(0, this.cursorColumn) +
+                        event.key +
+                        line.substr(this.cursorColumn);
+                    ++this.cursorColumn;
+
+                    this.updateLine(this.cursorLine);
+                    break;
+            }
+
             event.preventDefault();
-            this.exit();
+            return;
         }
+
+        switch (event.key) {
+            case 'a':
+                this.mode = 'i';
+                ++this.cursorColumn;
+                this.updateLine(this.cursorLine);
+                break;
+
+            case 'i':
+                this.mode = 'i';
+                break;
+
+            case 'o':
+                this.buffer.splice(this.cursorLine + 1, 0, '');
+                this.ui.insertBefore(
+                    this.createLine(),
+                    this.ui.children[this.cursorLine + 1]
+                );
+                ++this.cursorLine;
+                this.mode = 'i';
+                this.updateLine(this.cursorLine - 1);
+                this.updateLine(this.cursorLine);
+                this.updateLineNumber(this.cursorLine);
+                break;
+
+            case 'j':
+                if (this.cursorLine < this.buffer.length - 1) {
+                    ++this.cursorLine;
+                    if (this.cursorColumn < this.virtualColumn) {
+                        this.cursorColumn = this.virtualColumn;
+                    } else {
+                        // force check bounds
+                        this.cursorColumn = this.cursorColumn;
+                    }
+                    this.updateLine(this.cursorLine - 1);
+                    this.updateLine(this.cursorLine);
+                }
+                break;
+
+            case 'k':
+                if (this.cursorLine > 0) {
+                    --this.cursorLine;
+                    if (this.cursorColumn < this.virtualColumn) {
+                        this.cursorColumn = this.virtualColumn;
+                    } else {
+                        // force check bounds
+                        this.cursorColumn = this.cursorColumn;
+                    }
+                    this.updateLine(this.cursorLine + 1);
+                    this.updateLine(this.cursorLine);
+                }
+                break;
+
+            case 'l':
+                if (this.cursorColumn < line.length - 1) {
+                    this.virtualColumn = this.cursorColumn + 1;
+                    this.updateLine(this.cursorLine);
+                }
+                break;
+
+            case 'h':
+                if (this.cursorColumn > 0) {
+                    this.virtualColumn = this.cursorColumn - 1;
+                    this.updateLine(this.cursorLine);
+                }
+                break;
+
+            case 'w':
+                // FIXME: doesn't work on empty lines
+                {
+                    let found = false;
+
+                    let type;
+                    if (ID.test(line[this.cursorColumn]))
+                        type = ID;
+                    else if (SYM.test(line[this.cursorColumn]))
+                        type = SYM;
+                    else
+                        type = null;
+
+                    for (let idx = this.cursorColumn; idx < line.length; ++idx) {
+                        if (type && type.test(line[idx]))
+                            continue;
+
+                        type = null;
+
+                        if (!WS.test(line[idx])) {
+                            this.virtualColumn = idx;
+                            this.updateLine(this.cursorLine);
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found) {
+                        if (this.cursorLine < this.buffer.length - 1) {
+                            this.virtualColumn = 0;
+                            ++this.cursorLine;
+                        } else {
+                            this.virtualColumn = line.length - 1;
+                        }
+
+                        this.updateLine(this.cursorLine - 1);
+                        this.updateLine(this.cursorLine);
+                    }
+                }
+                break;
+
+            case 'b':
+                // FIXME: doesn't work on empty lines
+                {
+                    if (this.cursorColumn === 0) { // at start of line
+                        // no lines in front
+                        if (this.cursorLine === 0)
+                            break;
+
+                        // move to last column in previous line
+                        --this.cursorLine;
+                        line = this.buffer[this.cursorLine];
+                        this.cursorColumn = line.length - 1;
+
+                        this.updateLine(this.cursorLine + 1);
+                    } else {
+                        // start from previous column to avoid being stuck
+                        --this.cursorColumn;
+                    }
+
+                    let found = false;
+
+                    let type = null;
+                    for (let idx = this.cursorColumn; idx >= 0; --idx) {
+                        if (!type) {
+                            if (ID.test(line[idx]))
+                                type = ID;
+                            else if (SYM.test(line[idx]))
+                                type = SYM;
+                            continue;
+                        }
+
+                        if (type.test(line[idx]))
+                            continue;
+
+                        this.virtualColumn = idx + 1;
+                        found = true;
+                        break;
+                    }
+
+                    if (!found)
+                        this.virtualColumn = 0;
+
+                    this.updateLine(this.cursorLine);
+                }
+                break;
+
+            case '$':
+                this.virtualColumn = this.cursorColumn = line.length - 1;
+                this.updateLine(this.cursorLine);
+                break;
+
+            case '^':
+                this.virtualColumn = this.cursorColumn = 0;
+                this.updateLine(this.cursorLine);
+                break;
+
+            case 'q':
+                this.exit();
+                break;
+
+            case 'z':
+                this.ending = true;
+                this.save();
+                break;
+
+            default:
+                return;
+        }
+        event.preventDefault();
+    }
+
+    createLine(text = '') {
+        let pre = document.createElement('pre');
+        let line = document.createElement('span');
+        let span = document.createElement('span');
+
+        line.classList.add('prompt');
+        span.textContent = text;
+
+        pre.appendChild(line);
+        pre.appendChild(span);
+
+        return pre;
+    }
+
+    updateLine(ln) {
+        let pre = this.ui.children[ln];
+
+        if (this.cursorLine !== ln) {
+            pre.lastChild.textContent = this.buffer[ln] || '\n';
+            return;
+        }
+
+        let line = this.buffer[ln];
+        pre.lastChild.innerHTML =
+            escapeHTML(line.substr(0, this.cursorColumn)) +
+            span(escapeHTML(line.substr(this.cursorColumn, 1)) || ' ', 'cursor') +
+            escapeHTML(line.substr(this.cursorColumn + 1));
+    }
+
+    updateLineNumber(ln) {
+        let width = this.buffer.length.toString().length + 1;
+
+        // update all line numbers when width changes
+        if (width !== this.lnWidth) {
+            this.lnWidth = width;
+            return this.updateLineNumber(0);
+        }
+
+        for (; ln < this.buffer.length; ++ln) {
+            let pre = this.ui.children[ln];
+
+            let num = (ln + 1).toString() + ' ';
+            while (num.length < width)
+                num = ' ' + num;
+            pre.firstChild.textContent = num;
+        }
+    }
+
+    save() {
+        if (this.promise)
+            return;
+
+        let content = this.buffer.join('\n');
+        this.promise = Async.write(this.file, content);
+        this.promise.then(() => {
+            this.promise = null;
+            if (this.ending)
+                this.exit();
+        }, error => {
+            this.promise = null;
+            this.ending = false;
+            this.stderr.writeText(`vi: ${error}`);
+        });
     }
 }
 
@@ -1166,7 +1553,7 @@ class Clear extends Program {
 
 const bin = {
     'sh': Shell,
-    'ed': Editor,
+    'vi': Editor,
     'js': Interpreter,
     'cat': Cat,
     'tee': Tee,
