@@ -1,7 +1,7 @@
 'use strict';
 
 function span(str, cls) {
-    return '<span class="' + cls + '">' + str + '</span>';
+    return `<span class="${cls}">${str}</span>`;
 }
 
 function escapeHTML(str) {
@@ -127,7 +127,7 @@ const Async = {
         if (content !== null)
             return Promise.resolve(content);
         else
-            return Promise.reject(path + ': no such file');
+            return Promise.reject(`${path}: no such file`);
     },
 
     write(path, content) {
@@ -148,7 +148,7 @@ const Async = {
     move(path, target) {
         let content = localStorage.getItem(path);
         if (content === null)
-            return Promise.reject(path + ': no such file');
+            return Promise.reject(`${path}: no such file`);
 
         localStorage.setItem(target, content);
         localStorage.removeItem(path);
@@ -170,6 +170,7 @@ class Program {
         this.inputEnabled = false;
         this.echo = true;
         this.password = false;
+        this.rawInput = false;
         this.history = [];
         this.historyIndex = 0;
         this.parent = parent;
@@ -238,15 +239,12 @@ class Program {
         this.stdout.eof();
         this.stderr.eof();
 
-        // if (!this.parent) {
-        //     term.stdout = null;
-        //     return;
-        // }
-
-        // restore control to parent process
-        let input = this.parent.stdin;
-        input.stdout = this.parent;
-        input.updateInput();
+        if (this.jobReturned()) {
+            // restore control to parent process when job returned
+            let input = this.parent.stdin;
+            input.stdout = this.parent;
+            input.updateInput();
+        }
 
         if (input.state === TERMINATED)
             this.eof();
@@ -259,8 +257,8 @@ class Program {
 
     write(content) {
         if (this.state !== RUNNING || !this.inputEnabled)
-            return;
-        this.onInput(content);
+            return false;
+        return this.onWrite(content) !== false;
     }
 
     writeRaw(content) {
@@ -295,7 +293,11 @@ class Program {
         // ignore
     }
 
-    onInput(content) {
+    onWrite(content) {
+        return false;
+    }
+
+    onInput(event) {
         // ignore
     }
 
@@ -384,6 +386,11 @@ class Term extends Program {
 
         document.addEventListener('keydown', e => {
             let prog = this.stdout;
+
+            if (prog.rawInput) {
+                prog.onInput(e);
+                return;
+            }
 
             if (e.ctrlKey) {
                 switch (e.key) {
@@ -505,7 +512,7 @@ class Term extends Program {
         this.updateInput();
     }
 
-    onInput(content) {
+    onWrite(content) {
         this.outputElement.appendChild(content.print());
 
         // FIXME: always scroll if at bottom
@@ -584,7 +591,7 @@ class TermError extends Program {
         // ignore
     }
 
-    onInput(content) {
+    onWrite(content) {
         this.stdout.writeRaw(span(escapeHTML(content.str()), 'error'));
     }
 }
@@ -604,7 +611,7 @@ class Monitor extends Program {
             super.onEOF();
     }
 
-    onInput(content) {
+    onWrite(content) {
         this.callback(this, content);
     }
 }
@@ -662,7 +669,7 @@ class Shell extends Program {
                 this.exit(127);
             });
         } else if (this.stdin.tty) { // interactive
-            Async.read('.config').then(content => {
+            Async.read('.profile').then(content => {
                 // config file found, execute it
 
                 this.inputEnabled = true;
@@ -677,13 +684,15 @@ class Shell extends Program {
                 this.stdin.updateInput();
             });
         } else {
+            this.script = '-';
+
             // executing commands from stdin
             this.inputEnabled = true;
             this.loaded = true;
         }
     }
 
-    onInput(content) {
+    onWrite(content) {
         // TODO: history shortcuts
 
         if (this.historyPromise === null) {
@@ -854,7 +863,7 @@ class Shell extends Program {
 
             case 'exit':
                 return new Caller(this, (proc) => {
-                    let code = Number.parseInt(proc.args[0]);
+                    let code = Number.parseInt(proc.args[0] || 0);
                     if (Number.isNaN(code)) {
                         proc.stderr.writeText('sh: exit: ' +
                             proc.args[0] + ': numeric argument required');
@@ -877,6 +886,24 @@ class Shell extends Program {
     // TODO: source function
 }
 
+class Editor extends Program {
+    constructor(parent) {
+        super(parent);
+        this.rawInput = true;
+    }
+
+    onExecute(file) {
+        this.file = file;
+    }
+
+    onInput(event) {
+        if (event.key === 'q') {
+            event.preventDefault();
+            this.exit();
+        }
+    }
+}
+
 class Interpreter extends Program {
     constructor(parent) {
         super(parent);
@@ -884,7 +911,7 @@ class Interpreter extends Program {
         this.inputEnabled = true;
     }
 
-    onInput(content) {
+    onWrite(content) {
         try {
             this.stdout.write(new ObjectOutput(eval(content.str())));
         } catch (e) {
@@ -907,12 +934,12 @@ class Cat extends Program {
                 this.stdout.writeText(content);
             this.exit();
         }, error => {
-            this.stderr.writeText('cat: ' + error);
+            this.stderr.writeText(`cat: ${error}`);
             this.exit(1);
         });
     }
 
-    onInput(content) {
+    onWrite(content) {
         this.stdout.write(content);
     }
 }
@@ -926,7 +953,7 @@ class Tee extends Program {
         this.promise.then(() => this.promise = null);
     }
 
-    onInput(content) {
+    onWrite(content) {
         this.content.push(content.str());
         this.stdout.write(content);
         this.appendNext();
@@ -959,7 +986,7 @@ class List extends Program {
             this.stdout.write(new ArrayOutput(list, 'multicolumn'));
             this.exit();
         }, error => {
-            this.stderr.writeText('ls: ' + error);
+            this.stderr.writeText(`ls: ${error}`);
             this.exit(1);
         });
     }
@@ -980,7 +1007,7 @@ class Move extends Program {
         Async.move(path, target).then(() => {
             this.exit();
         }, error => {
-            this.stderr.writeText('mv: ' + error);
+            this.stderr.writeText(`mv: ${error}`);
             this.exit(1);
         });
     }
@@ -1009,14 +1036,10 @@ class Curl extends Program {
 
         this.promise = Async.request('GET', url);
         this.promise.then(content => {
-            // TODO: this can probably be removed
-            if (this.state !== RUNNING)
-                return;
-
             this.stdout.writeText(content);
             this.exit();
         }, error => {
-            // TODO: error message
+            this.stderr.writeText(`curl: ${error}`);
             this.exit(1);
         });
     }
@@ -1042,9 +1065,12 @@ class Head extends Program {
         this.inputEnabled = true;
     }
 
-    onInput(content) {
+    onWrite(content) {
         let items = content.items().slice(0, this.counter);
-        this.stdout.write(new ArrayOutput(items));
+        if (!this.stdout.write(new ArrayOutput(items))) {
+            this.exit();
+            return;
+        }
         this.counter -= items.length;
 
         if (this.counter === 0) {
@@ -1070,7 +1096,7 @@ class Tail extends Program {
         this.items = [];
     }
 
-    onInput(content) {
+    onWrite(content) {
         for (let item of content.items()) {
             if (this.items.length === this.counter)
                 this.items.shift();
@@ -1097,7 +1123,7 @@ class Grep extends Program {
         this.matched = false;
     }
 
-    onInput(content) {
+    onWrite(content) {
         let matches = content.items().filter(e => this.pattern.test(e.str()));
 
         if (matches.length === 0)
@@ -1140,6 +1166,7 @@ class Clear extends Program {
 
 const bin = {
     'sh': Shell,
+    'ed': Editor,
     'js': Interpreter,
     'cat': Cat,
     'tee': Tee,

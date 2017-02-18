@@ -60,26 +60,31 @@ body {
     0% {
         background-color: lightgrey;
         color: black;
+        box-shadow: 0 0 5px lightgrey;
     }
 
     40% {
         background-color: lightgrey;
         color: black;
+        box-shadow: 0 0 5px lightgrey;
     }
 
     50% {
-        background-color: transparent;
+        background-color: inherit;
         color: inherit;
+        box-shadow: 0 0 0 lightgrey;
     }
 
     90% {
-        background-color: transparent;
+        background-color: inherit;
         color: inherit;
+        box-shadow: 0 0 0 lightgrey;
     }
 
     100% {
         background-color: lightgrey;
         color: black;
+        box-shadow: 0 0 5px lightgrey;
     }
 }
 
