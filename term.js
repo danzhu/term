@@ -565,16 +565,16 @@ class Term extends Program {
             if (prog.ui)
                 this.uiElement.appendChild(prog.ui);
         }
-        this.promptElement.innerHTML = prog ? prog.prompt : '';
+        this.promptElement.innerHTML = prog.prompt;
 
         let content = this.inputContent;
 
         // password mask
-        if (prog && prog.password)
+        if (prog.password)
             content = '*'.repeat(content.length);
 
         // disabled input
-        if (!prog || !prog.inputEnabled) {
+        if (!prog.inputEnabled) {
             this.inputElement.innerHTML = content;
             return;
         }
@@ -1525,6 +1525,25 @@ class Grep extends Program {
     }
 }
 
+class Processes extends Program {
+    onExecute() {
+        this.tree = [];
+
+        // TODO: find tty in a better way
+        let term = this.stdin;
+        this.printTree(term, 0);
+        this.stdout.write(new ArrayOutput(this.tree.map(e => new TextOutput(e))));
+        return 0;
+    }
+
+    printTree(proc, level) {
+        // TODO: store process name in process
+        this.tree.push(' '.repeat(level) + proc.constructor.name);
+        for (let pr of proc.children)
+            this.printTree(pr, level + 2);
+    }
+}
+
 class Sleep extends Program {
     onExecute(time) {
         let t = Number.parseFloat(time);
@@ -1565,6 +1584,7 @@ const bin = {
     'tail': Tail,
     'grep': Grep,
     'sleep': Sleep,
+    'ps': Processes,
     'clear': Clear
 };
 
