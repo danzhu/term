@@ -33,7 +33,17 @@ body {
 }
 
 .cursor-bar {
-    background: linear-gradient(to right, transparent, lightgrey 10%, transparent 20%);
+    position: relative;
+}
+
+.cursor-bar::before {
+    position: absolute;
+    left: 0;
+    width: 1px;
+    height: 100%;
+    background-color: lightgrey;
+    box-shadow: 0 0 5px lightgrey;
+    content: '';
     animation: 1s cursor-bar linear 10;
 }
 
@@ -70,27 +80,30 @@ body {
     50% {
         background-color: inherit;
         color: inherit;
-        box-shadow: 0 0 0 lightgrey;
+        box-shadow: 0 0 0 transparent;
     }
 
     90% {
         background-color: inherit;
         color: inherit;
-        box-shadow: 0 0 0 lightgrey;
+        box-shadow: 0 0 0 transparent;
     }
 }
 
 @keyframes cursor-bar {
     40% {
-        background: linear-gradient(to right, transparent, lightgrey 10%, transparent 20%);
+        background-color: lightgrey;
+        box-shadow: 0 0 5px lightgrey;
     }
 
     50% {
-        background: linear-gradient(to right, transparent, transparent);
+        background-color: inherit;
+        box-shadow: 0 0 0 transparent;
     }
 
     90% {
-        background: linear-gradient(to right, transparent, transparent);
+        background-color: inherit;
+        box-shadow: 0 0 0 transparent;
     }
 }
 
