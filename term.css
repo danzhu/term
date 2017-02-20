@@ -1,16 +1,12 @@
 body {
     margin: 0;
+    background-color: rgb(15, 15, 15);
 }
 
 #term {
-    position: absolute;
     box-sizing: border-box;
-    height: 100%;
-    width: 100%;
     padding: 10px;
-    overflow-x: hidden;
     color: lightgrey;
-    background-color: rgb(15, 15, 15);
 }
 
 #term pre {
@@ -29,8 +25,16 @@ body {
     display: block;
 }
 
-.cursor {
-    animation: 1s cursor linear infinite;
+.cursor-block {
+    background-color: lightgrey;
+    color: black;
+    box-shadow: 0 0 5px lightgrey;
+    animation: 1s cursor-block linear 10;
+}
+
+.cursor-bar {
+    background: linear-gradient(to right, transparent, lightgrey 10%, transparent 20%);
+    animation: 1s cursor-bar linear 10;
 }
 
 .prompt {
@@ -56,13 +60,7 @@ body {
     white-space: nowrap !important;
 }
 
-@keyframes cursor {
-    0% {
-        background-color: lightgrey;
-        color: black;
-        box-shadow: 0 0 5px lightgrey;
-    }
-
+@keyframes cursor-block {
     40% {
         background-color: lightgrey;
         color: black;
@@ -80,11 +78,19 @@ body {
         color: inherit;
         box-shadow: 0 0 0 lightgrey;
     }
+}
 
-    100% {
-        background-color: lightgrey;
-        color: black;
-        box-shadow: 0 0 5px lightgrey;
+@keyframes cursor-bar {
+    40% {
+        background: linear-gradient(to right, transparent, lightgrey 10%, transparent 20%);
+    }
+
+    50% {
+        background: linear-gradient(to right, transparent, transparent);
+    }
+
+    90% {
+        background: linear-gradient(to right, transparent, transparent);
     }
 }
 

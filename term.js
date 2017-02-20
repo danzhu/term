@@ -581,7 +581,7 @@ class Term extends Program {
 
         let cursor = span(
             escapeHTML(content.substr(this.inputCursor, 1) || ' '),
-            'cursor'
+            'cursor-block'
         );
 
         this.inputElement.innerHTML =
@@ -909,6 +909,14 @@ class Editor extends Program {
         this.promise = null;
     }
 
+    get line() {
+        return this.buffer[this._cursorLine];
+    }
+
+    set line(value) {
+        this.buffer[this._cursorLine] = value;
+    }
+
     get cursorLine() {
         return this._cursorLine;
     }
@@ -927,9 +935,9 @@ class Editor extends Program {
     }
 
     set cursorColumn(value) {
-        if (value < 0)
+        if (this.line.length === 0 || value < 0)
             this._cursorColumn = 0;
-        else if (value >= this.buffer[this._cursorLine].length)
+        else if (value >= this.line.length)
             this._cursorColumn =
                 this.buffer[this._cursorLine].length -
                 (this.mode === 'i' ? 0 : 1);
@@ -942,17 +950,29 @@ class Editor extends Program {
     }
 
     set virtualColumn(value) {
-        if (value < 0)
+        if (this.line.length === 0 || value < 0)
             this._virtualColumn = this._cursorColumn = 0;
-        else if (value >= this.buffer[this._cursorLine].length)
+        else if (value >= this.line.length)
             this._virtualColumn = this._cursorColumn =
-                this.buffer[this._cursorLine].length -
+                this.line.length -
                 (this.mode === 'i' ? 0 : 1);
         else
             this._virtualColumn = this._cursorColumn = value;
     }
 
     onExecute(file) {
+        if (!file) {
+            // TODO: some way of creating and saving a new file
+            // this.buffer = [''];
+            // this.ui.appendChild(this.createLine(''));
+            // this.cursorLine = 0;
+            // this.virtualColumn = 0;
+            // this.updateLine(0);
+            // this.updateLineNumber(0);
+            this.stderr.writeText('vi: no file to edit');
+            return 1;
+        }
+
         this.file = file;
 
         Async.read(file).then((content) => {
@@ -975,14 +995,12 @@ class Editor extends Program {
         if (this.ending)
             return;
 
-        let line = this.buffer[this.cursorLine];
-
         if (this.mode === 'i') {
             switch (event.key) {
                 case 'Enter':
-                    let next = line.substr(this.cursorColumn);
-                    this.buffer[this.cursorLine] =
-                        line.substr(0, this.cursorColumn);
+                    let next = this.line.substr(this.cursorColumn);
+                    this.line =
+                        this.line.substr(0, this.cursorColumn);
                     this.buffer.splice(this.cursorLine + 1, 0, next);
                     this.ui.insertBefore(
                         this.createLine(next),
@@ -999,17 +1017,17 @@ class Editor extends Program {
                 case 'Escape':
                     this.mode = 'n';
                     if (this.cursorColumn > 0) {
-                        --this.cursorColumn;
-                        this.updateLine(this.cursorLine);
+                        this.virtualColumn = this.cursorColumn - 1;
                     }
+                    this.updateLine(this.cursorLine);
                     break;
 
                 case 'Backspace':
                     if (this.cursorColumn > 0) { // delete char
-                        this.buffer[this.cursorLine] =
-                            line.substr(0, this.cursorColumn - 1) +
-                            line.substr(this.cursorColumn);
-                        --this.cursorColumn;
+                        this.line =
+                            this.line.substr(0, this.cursorColumn - 1) +
+                            this.line.substr(this.cursorColumn);
+                        this.virtualColumn = this.cursorColumn - 1;
 
                         this.updateLine(this.cursorLine);
                     } else if (this.cursorLine > 0) { // delete (join) line
@@ -1017,7 +1035,7 @@ class Editor extends Program {
 
                         // remove line
                         this.buffer[this.cursorLine - 1] +=
-                            this.buffer[this.cursorLine];
+                            this.line;
                         this.ui.removeChild(this.ui.children[this.cursorLine]);
                         this.buffer.splice(this.cursorLine, 1);
 
@@ -1033,11 +1051,11 @@ class Editor extends Program {
                     if (event.key.length !== 1)
                         return;
 
-                    this.buffer[this.cursorLine] =
-                        line.substr(0, this.cursorColumn) +
+                    this.line =
+                        this.line.substr(0, this.cursorColumn) +
                         event.key +
-                        line.substr(this.cursorColumn);
-                    ++this.cursorColumn;
+                        this.line.substr(this.cursorColumn);
+                    this.virtualColumn = this.cursorColumn + 1;
 
                     this.updateLine(this.cursorLine);
                     break;
@@ -1050,22 +1068,24 @@ class Editor extends Program {
         switch (event.key) {
             case 'a':
                 this.mode = 'i';
-                ++this.cursorColumn;
+                this.virtualColumn = this.cursorColumn + 1;
                 this.updateLine(this.cursorLine);
                 break;
 
             case 'i':
                 this.mode = 'i';
+                this.updateLine(this.cursorLine);
                 break;
 
             case 'o':
+                this.mode = 'i';
                 this.buffer.splice(this.cursorLine + 1, 0, '');
                 this.ui.insertBefore(
                     this.createLine(),
                     this.ui.children[this.cursorLine + 1]
                 );
                 ++this.cursorLine;
-                this.mode = 'i';
+                this.virtualColumn = 0;
                 this.updateLine(this.cursorLine - 1);
                 this.updateLine(this.cursorLine);
                 this.updateLineNumber(this.cursorLine);
@@ -1100,7 +1120,7 @@ class Editor extends Program {
                 break;
 
             case 'l':
-                if (this.cursorColumn < line.length - 1) {
+                if (this.cursorColumn < this.line.length - 1) {
                     this.virtualColumn = this.cursorColumn + 1;
                     this.updateLine(this.cursorLine);
                 }
@@ -1114,25 +1134,24 @@ class Editor extends Program {
                 break;
 
             case 'w':
-                // FIXME: doesn't work on empty lines
                 {
                     let found = false;
 
                     let type;
-                    if (ID.test(line[this.cursorColumn]))
+                    if (ID.test(this.line[this.cursorColumn]))
                         type = ID;
-                    else if (SYM.test(line[this.cursorColumn]))
+                    else if (SYM.test(this.line[this.cursorColumn]))
                         type = SYM;
                     else
                         type = null;
 
-                    for (let idx = this.cursorColumn; idx < line.length; ++idx) {
-                        if (type && type.test(line[idx]))
+                    for (let idx = this.cursorColumn; idx < this.line.length; ++idx) {
+                        if (type && type.test(this.line[idx]))
                             continue;
 
                         type = null;
 
-                        if (!WS.test(line[idx])) {
+                        if (!WS.test(this.line[idx])) {
                             this.virtualColumn = idx;
                             this.updateLine(this.cursorLine);
                             found = true;
@@ -1145,7 +1164,7 @@ class Editor extends Program {
                             this.virtualColumn = 0;
                             ++this.cursorLine;
                         } else {
-                            this.virtualColumn = line.length - 1;
+                            this.virtualColumn = this.line.length - 1;
                         }
 
                         this.updateLine(this.cursorLine - 1);
@@ -1155,7 +1174,6 @@ class Editor extends Program {
                 break;
 
             case 'b':
-                // FIXME: doesn't work on empty lines
                 {
                     if (this.cursorColumn === 0) { // at start of line
                         // no lines in front
@@ -1164,13 +1182,12 @@ class Editor extends Program {
 
                         // move to last column in previous line
                         --this.cursorLine;
-                        line = this.buffer[this.cursorLine];
-                        this.cursorColumn = line.length - 1;
+                        this.virtualColumn = this.line.length - 1;
 
                         this.updateLine(this.cursorLine + 1);
                     } else {
                         // start from previous column to avoid being stuck
-                        --this.cursorColumn;
+                        this.virtualColumn = this.cursorColumn - 1;
                     }
 
                     let found = false;
@@ -1178,14 +1195,14 @@ class Editor extends Program {
                     let type = null;
                     for (let idx = this.cursorColumn; idx >= 0; --idx) {
                         if (!type) {
-                            if (ID.test(line[idx]))
+                            if (ID.test(this.line[idx]))
                                 type = ID;
-                            else if (SYM.test(line[idx]))
+                            else if (SYM.test(this.line[idx]))
                                 type = SYM;
                             continue;
                         }
 
-                        if (type.test(line[idx]))
+                        if (type.test(this.line[idx]))
                             continue;
 
                         this.virtualColumn = idx + 1;
@@ -1201,7 +1218,7 @@ class Editor extends Program {
                 break;
 
             case '$':
-                this.virtualColumn = this.cursorColumn = line.length - 1;
+                this.virtualColumn = this.cursorColumn = this.line.length - 1;
                 this.updateLine(this.cursorLine);
                 break;
 
@@ -1248,10 +1265,22 @@ class Editor extends Program {
         }
 
         let line = this.buffer[ln];
+        let cursor = span(
+            escapeHTML(line.substr(this.cursorColumn, 1)) || ' ',
+            this.mode === 'i' ? 'cursor-bar' : 'cursor-block'
+        );
+
         pre.lastChild.innerHTML =
             escapeHTML(line.substr(0, this.cursorColumn)) +
-            span(escapeHTML(line.substr(this.cursorColumn, 1)) || ' ', 'cursor') +
+            cursor +
             escapeHTML(line.substr(this.cursorColumn + 1));
+
+        // scroll into view
+        let rect = pre.getBoundingClientRect();
+        if (rect.top < 0)
+            pre.scrollIntoView(true);
+        else if (rect.bottom > window.innerHeight)
+            pre.scrollIntoView(false);
     }
 
     updateLineNumber(ln) {
