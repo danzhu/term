@@ -907,6 +907,127 @@ class Editor extends Program {
         this.mode = 'n';
         this.ending = false;
         this.promise = null;
+        this.pendingOperator = null;
+
+        this.operators = {
+            'c': (key) => {
+                if (key === 'c') {
+                    this.mode = 'i';
+                    this.line = '';
+                    this.virtualColumn = 0;
+                    this.updateLine(this.cursorLine);
+                    return;
+                }
+
+                let motion = this.motions[key];
+
+                if (!motion)
+                    return;
+
+                let ln = this.cursorLine;
+                let col = this.cursorColumn;
+                motion();
+
+                this.updateLine(this.cursorLine);
+            },
+
+            'd': () => {
+            }
+        };
+
+        this.motions = {
+            'j': () => {
+                ++this.cursorLine;
+                this.cursorColumn = this.virtualColumn;
+            },
+
+            'k': () => {
+                --this.cursorLine;
+                this.cursorColumn = this.virtualColumn;
+            },
+
+            'l': () => {
+                this.virtualColumn = this.cursorColumn + 1;
+            },
+
+            'h': () => {
+                this.virtualColumn = this.cursorColumn - 1;
+            },
+
+            'w': () => {
+                let type;
+                if (ID.test(this.line[this.cursorColumn]))
+                    type = ID;
+                else if (SYM.test(this.line[this.cursorColumn]))
+                    type = SYM;
+                else
+                    type = null;
+
+                for (let idx = this.cursorColumn; idx < this.line.length; ++idx) {
+                    if (type && type.test(this.line[idx]))
+                        continue;
+
+                    type = null;
+
+                    if (!WS.test(this.line[idx])) {
+                        this.virtualColumn = idx;
+                        this.updateLine(this.cursorLine);
+                        return;
+                    }
+                }
+
+                if (this.cursorLine < this.buffer.length - 1) {
+                    this.virtualColumn = 0;
+                    ++this.cursorLine;
+                } else {
+                    this.virtualColumn = this.line.length - 1;
+                }
+            },
+
+            'b': () => {
+                if (this.cursorColumn === 0) { // at start of line
+                    // no lines in front
+                    if (this.cursorLine === 0)
+                        return;
+
+                    // move to last column in previous line
+                    --this.cursorLine;
+                    this.virtualColumn = this.line.length - 1;
+                } else {
+                    // start from previous column to avoid being stuck
+                    this.virtualColumn = this.cursorColumn - 1;
+                }
+
+                let type = null;
+                for (let idx = this.cursorColumn; idx >= 0; --idx) {
+                    if (!type) {
+                        if (ID.test(this.line[idx]))
+                            type = ID;
+                        else if (SYM.test(this.line[idx]))
+                            type = SYM;
+                        // else: whitespace
+                        continue;
+                    }
+
+                    if (type.test(this.line[idx]))
+                        continue;
+
+                    this.virtualColumn = idx + 1;
+                    return;
+                }
+
+                // not found
+                this.virtualColumn = 0;
+            },
+
+            '$': () => {
+                this.virtualColumn = this.line.length - 1;
+            },
+
+            '^': () => {
+                this.virtualColumn = 0;
+            }
+        };
     }
 
     get line() {
@@ -925,7 +1046,7 @@ class Editor extends Program {
         if (value < 0)
             this._cursorLine = 0;
         else if (value >= this.buffer.length)
-            this._cursorLine = this.buffer.length;
+            this._cursorLine = this.buffer.length - 1;
         else
             this._cursorLine = value;
     }
@@ -995,12 +1116,18 @@ class Editor extends Program {
         if (this.ending)
             return;
 
+        if (this.pendingOperator) {
+            this.pendingOperator(event.key);
+            this.pendingOperator = null;
+            event.preventDefault();
+            return;
+        }
+
         if (this.mode === 'i') {
             switch (event.key) {
                 case 'Enter':
                     let next = this.line.substr(this.cursorColumn);
-                    this.line =
-                        this.line.substr(0, this.cursorColumn);
+                    this.line = this.line.substr(0, this.cursorColumn);
                     this.buffer.splice(this.cursorLine + 1, 0, next);
                     this.ui.insertBefore(
                         this.createLine(next),
@@ -1091,142 +1218,6 @@ class Editor extends Program {
                 this.updateLineNumber(this.cursorLine);
                 break;
 
-            case 'j':
-                if (this.cursorLine < this.buffer.length - 1) {
-                    ++this.cursorLine;
-                    if (this.cursorColumn < this.virtualColumn) {
-                        this.cursorColumn = this.virtualColumn;
-                    } else {
-                        // force check bounds
-                        this.cursorColumn = this.cursorColumn;
-                    }
-                    this.updateLine(this.cursorLine - 1);
-                    this.updateLine(this.cursorLine);
-                }
-                break;
-
-            case 'k':
-                if (this.cursorLine > 0) {
-                    --this.cursorLine;
-                    if (this.cursorColumn < this.virtualColumn) {
-                        this.cursorColumn = this.virtualColumn;
-                    } else {
-                        // force check bounds
-                        this.cursorColumn = this.cursorColumn;
-                    }
-                    this.updateLine(this.cursorLine + 1);
-                    this.updateLine(this.cursorLine);
-                }
-                break;
-
-            case 'l':
-                if (this.cursorColumn < this.line.length - 1) {
-                    this.virtualColumn = this.cursorColumn + 1;
-                    this.updateLine(this.cursorLine);
-                }
-                break;
-
-            case 'h':
-                if (this.cursorColumn > 0) {
-                    this.virtualColumn = this.cursorColumn - 1;
-                    this.updateLine(this.cursorLine);
-                }
-                break;
-
-            case 'w':
-                {
-                    let found = false;
-
-                    let type;
-                    if (ID.test(this.line[this.cursorColumn]))
-                        type = ID;
-                    else if (SYM.test(this.line[this.cursorColumn]))
-                        type = SYM;
-                    else
-                        type = null;
-
-                    for (let idx = this.cursorColumn; idx < this.line.length; ++idx) {
-                        if (type && type.test(this.line[idx]))
-                            continue;
-
-                        type = null;
-
-                        if (!WS.test(this.line[idx])) {
-                            this.virtualColumn = idx;
-                            this.updateLine(this.cursorLine);
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if (!found) {
-                        if (this.cursorLine < this.buffer.length - 1) {
-                            this.virtualColumn = 0;
-                            ++this.cursorLine;
-                        } else {
-                            this.virtualColumn = this.line.length - 1;
-                        }
-
-                        this.updateLine(this.cursorLine - 1);
-                        this.updateLine(this.cursorLine);
-                    }
-                }
-                break;
-
-            case 'b':
-                {
-                    if (this.cursorColumn === 0) { // at start of line
-                        // no lines in front
-                        if (this.cursorLine === 0)
-                            break;
-
-                        // move to last column in previous line
-                        --this.cursorLine;
-                        this.virtualColumn = this.line.length - 1;
-
-                        this.updateLine(this.cursorLine + 1);
-                    } else {
-                        // start from previous column to avoid being stuck
-                        this.virtualColumn = this.cursorColumn - 1;
-                    }
-
-                    let found = false;
-
-                    let type = null;
-                    for (let idx = this.cursorColumn; idx >= 0; --idx) {
-                        if (!type) {
-                            if (ID.test(this.line[idx]))
-                                type = ID;
-                            else if (SYM.test(this.line[idx]))
-                                type = SYM;
-                            continue;
-                        }
-
-                        if (type.test(this.line[idx]))
-                            continue;
-
-                        this.virtualColumn = idx + 1;
-                        found = true;
-                        break;
-                    }
-
-                    if (!found)
-                        this.virtualColumn = 0;
-
-                    this.updateLine(this.cursorLine);
-                }
-                break;
-
-            case '$':
-                this.virtualColumn = this.cursorColumn = this.line.length - 1;
-                this.updateLine(this.cursorLine);
-                break;
-
-            case '^':
-                this.virtualColumn = this.cursorColumn = 0;
-                this.updateLine(this.cursorLine);
-                break;
-
             case 'q':
                 this.exit();
                 break;
@@ -1237,7 +1228,19 @@ class Editor extends Program {
                 break;
 
             default:
-                return;
+                if (this.operators[event.key]) {
+                    this.pendingOperator = this.operators[event.key];
+                } else if (this.motions[event.key]) {
+                    let ln = this.cursorLine;
+                    this.motions[event.key]();
+                    if (ln !== this.cursorLine)
+                        this.updateLine(ln);
+                    this.updateLine(this.cursorLine);
+                } else {
+                    // don't prevent default for any other key
+                    return;
+                }
+                break;
         }
         event.preventDefault();
     }
